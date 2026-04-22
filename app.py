@@ -25,18 +25,12 @@ macd_short = st.sidebar.number_input("MACD 短周期", value=12)
 macd_long = st.sidebar.number_input("MACD 长周期", value=26)
 macd_signal = st.sidebar.number_input("MACD 信号线", value=9)
 
-# 3. 核心获取数据逻辑 (加入反爬虫浏览器伪装)
+# 3. 核心获取数据逻辑 (听从官方报错指令，全权交由 YF 处理)
 @st.cache_data
 def fetch_us_data(code, start, end):
     try:
-        # 创建一个自定义的网络会话，把自己伪装成真实的 Chrome 浏览器
-        session = requests.Session()
-        session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
-        })
-        
-        # 使用带有伪装的 session 获取数据
-        ticker = yf.Ticker(code, session=session)
+        # 移除了所有自定义 session，让 yfinance 发挥它自带的终极反爬魔法
+        ticker = yf.Ticker(code)
         df = ticker.history(start=start, end=end)
         
         if not df.empty:
