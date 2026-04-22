@@ -2,6 +2,7 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import requests  # <--- 新增这一行
 
 # 1. 网页标题与布局设置
 st.set_page_config(page_title="美股进阶量化回测", layout="wide")
@@ -24,19 +25,22 @@ macd_short = st.sidebar.number_input("MACD 短周期", value=12)
 macd_long = st.sidebar.number_input("MACD 长周期", value=26)
 macd_signal = st.sidebar.number_input("MACD 信号线", value=9)
 
-# 3. 核心获取数据逻辑 (完美适配美国云服务器)
+# 3. 核心获取数据逻辑 (加入反爬虫浏览器伪装)
 @st.cache_data
 def fetch_us_data(code, start, end):
     try:
-        # 使用 yfinance 获取美股数据，原生支持复权 (Auto-adjusted)
-        ticker = yf.Ticker(code)
+        # 创建一个自定义的网络会话，把自己伪装成真实的 Chrome 浏览器
+        session = requests.Session()
+        session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
+        })
+        
+        # 使用带有伪装的 session 获取数据
+        ticker = yf.Ticker(code, session=session)
         df = ticker.history(start=start, end=end)
         
         if not df.empty:
-            # 清理时区信息，否则 Streamlit 画图可能会报错
             df.index = df.index.tz_localize(None)
-            
-            # 将 yfinance 的英文列名翻译成我们策略用的中文列名
             df.rename(columns={
                 'Open': '开盘', 
                 'High': '最高', 
@@ -44,8 +48,6 @@ def fetch_us_data(code, start, end):
                 'Close': '收盘', 
                 'Volume': '成交量'
             }, inplace=True)
-            
-            # 剔除不需要的股息和拆股列
             df = df[['开盘', '最高', '最低', '收盘', '成交量']]
             return df
         else:
