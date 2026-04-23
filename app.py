@@ -55,7 +55,6 @@ def fetch_global_data(code, start, end):
         return pd.DataFrame()
 
 # 核心计算引擎
-# 核心计算引擎 (已加入 ATR 止损与分批建仓)
 def run_strategy(data_df, fast, slow, m_short, m_long, m_sig, cost, atr_period, atr_multi, max_pos):
     df = data_df.copy()
     df['每日收益率'] = df['收盘'].pct_change()
@@ -137,6 +136,48 @@ def run_strategy(data_df, fast, slow, m_short, m_long, m_sig, cost, atr_period, 
     df['Drawdown'] = (df['策略净值'] - df['High_Water_Mark']) / df['High_Water_Mark']
     
     return df
+
+# === 交易胜率与盈亏比核心统计算法 ===
+def calculate_trade_stats(result_df):
+    """
+    通过仓位(Position)变化，提取每一次完整交易的收益率，
+    计算胜率、盈亏比和最大连续亏损次数。
+    """
+    # 检查是否有仓位列（安全校验）
+    if 'Position' not in result_df.columns:
+        return 0.0, 0.0, 0, 0, 0.0, 0.0
+
+    # 1. 识别每一次完整交易（从空仓到有仓位算作一次新交易开始）
+    is_invested = result_df['Position'] > 0
+    trade_starts = (result_df['Position'] > 0) & (result_df['Position'].shift(1) == 0)
+    trade_id = trade_starts.cumsum() # 给每次交易打上独立ID
+    
+    active_trades = result_df[is_invested]
+    
+    if active_trades.empty:
+        return 0.0, 0.0, 0, 0, 0.0, 0.0
+        
+    # 2. 按交易ID分组，计算单次完整交易的累计净收益率（含手续费）
+    trade_returns = active_trades.groupby(trade_id.loc[active_trades.index])['策略每日收益'].apply(lambda x: (1 + x).prod() - 1)
+    
+    # 3. 统计胜亏数据
+    win_trades = trade_returns[trade_returns > 0]
+    lose_trades = trade_returns[trade_returns <= 0] # 没赚钱或亏钱都算亏损
+    
+    total_rounds = len(trade_returns)
+    win_rate = len(win_trades) / total_rounds if total_rounds > 0 else 0
+    
+    avg_win = win_trades.mean() if not win_trades.empty else 0
+    avg_loss = lose_trades.mean() if not lose_trades.empty else 0
+    
+    # 4. 盈亏比 (平均盈利 / 平均亏损的绝对值)
+    pl_ratio = abs(avg_win / avg_loss) if avg_loss != 0 else (99.99 if avg_win > 0 else 0)
+    
+    # 5. 计算最大连续亏损次数（极为关键的心理抗压指标）
+    is_loss = (trade_returns <= 0).astype(int)
+    max_cons_losses = is_loss.groupby((is_loss != is_loss.shift()).cumsum()).sum().max()
+    
+    return win_rate, pl_ratio, int(max_cons_losses), total_rounds, avg_win, avg_loss
 
 # ================= 新增拼接部分 1：多资产引擎 =================
 @st.cache_data
@@ -319,6 +360,16 @@ with tab1:
             m3.metric("极限最大回撤", f"{max_dd*100:.2f}%", delta="风控指标", delta_color="inverse")
             m4.metric("夏普比率 (Sharpe)", f"{sharpe_ratio:.2f}", "每单位总风险收益")
             m5.metric("索提诺比率 (Sortino)", f"{sortino_ratio:.2f}", "每单位下行风险收益")
+            
+            # === 新增：交易灵魂统计看板 ===
+            win_rate, pl_ratio, max_cons_losses, total_rounds, avg_win, avg_loss = calculate_trade_stats(result_df)
+            
+            st.markdown("### 🎯 核心交易统计 (Trade Statistics)")
+            t1, t2, t3, t4 = st.columns(4)
+            t1.metric("策略胜率 (Win Rate)", f"{win_rate*100:.1f}%", "趋势跟踪通常胜率<50%")
+            t2.metric("盈亏比 (P/L Ratio)", f"{pl_ratio:.2f}", f"均赚 {avg_win*100:.1f}% / 均亏 {avg_loss*100:.1f}%")
+            t3.metric("最大连亏次数", f"{max_cons_losses} 次", delta="实盘心理抗压阀值", delta_color="inverse")
+            t4.metric("完整交易轮次", f"{total_rounds} 轮", f"换手操作: {int(total_trades)} 次")
             
             st.markdown("---")
             
