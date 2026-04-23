@@ -30,7 +30,13 @@ macd_long = st.sidebar.number_input("MACD 长周期", value=26)
 macd_signal = st.sidebar.number_input("MACD 信号线", value=9)
 
 st.sidebar.markdown("---")
-st.sidebar.header("3. 真实环境模拟")
+st.sidebar.header("3. 风控与仓位管理 (ATR)")
+atr_period = st.sidebar.number_input("ATR 计算周期", value=14)
+atr_multi = st.sidebar.number_input("ATR 止损乘数 (X倍ATR)", value=2.0, step=0.1)
+max_pos = st.sidebar.slider("首次建仓比例", min_value=0.1, max_value=1.0, value=0.5, step=0.1, help="0.5表示首次只买半仓，盈利后加仓")
+
+st.sidebar.markdown("---")
+st.sidebar.header("4. 真实环境模拟") 
 cost_rate_input = st.sidebar.number_input("单边交易综合成本 (千分之)", min_value=0.0, max_value=10.0, value=1.0, step=0.1)
 trade_cost = cost_rate_input / 1000.0 
 
@@ -49,7 +55,8 @@ def fetch_global_data(code, start, end):
         return pd.DataFrame()
 
 # 核心计算引擎
-def run_strategy(data_df, fast, slow, m_short, m_long, m_sig, cost):
+# 核心计算引擎 (已加入 ATR 止损与分批建仓)
+def run_strategy(data_df, fast, slow, m_short, m_long, m_sig, cost, atr_period, atr_multi, max_pos):
     df = data_df.copy()
     df['每日收益率'] = df['收盘'].pct_change()
     df['Fast_MA'] = df['收盘'].rolling(window=fast).mean()
@@ -61,10 +68,63 @@ def run_strategy(data_df, fast, slow, m_short, m_long, m_sig, cost):
     df['DEA'] = df['DIF'].ewm(span=m_sig, adjust=False).mean()
     df['MACD_Hist'] = 2 * (df['DIF'] - df['DEA']) 
     
-    df['Signal'] = np.where((df['Fast_MA'] > df['Slow_MA']) & (df['MACD_Hist'] > 0), 1, 0)
-    df['Trade_Action'] = df['Signal'].diff().abs().fillna(0)
+    # === 新增：计算 ATR (真实波动幅度) ===
+    df['Prev_Close'] = df['收盘'].shift(1)
+    df['TR'] = np.maximum(df['最高'] - df['最低'],
+               np.maximum(abs(df['最高'] - df['Prev_Close']),
+                          abs(df['最低'] - df['Prev_Close'])))
+    df['ATR'] = df['TR'].rolling(window=int(atr_period)).mean()
     
-    df['策略每日毛收益'] = df['Signal'].shift(1) * df['每日收益率']
+    # === 新增：状态机模拟 (仓位管理与动态止损) ===
+    close_arr = df['收盘'].values
+    low_arr = df['最低'].values
+    fast_ma = df['Fast_MA'].values
+    slow_ma = df['Slow_MA'].values
+    macd_h = df['MACD_Hist'].values
+    atr_arr = df['ATR'].fillna(0).values
+    
+    positions = np.zeros(len(df))
+    entry_price = 0.0
+    stop_loss = 0.0
+    
+    for i in range(1, len(df)):
+        buy_signal = (fast_ma[i-1] > slow_ma[i-1]) and (macd_h[i-1] > 0)
+        sell_signal = (fast_ma[i-1] < slow_ma[i-1])
+        current_pos = positions[i-1]
+        
+        if current_pos == 0:
+            if buy_signal:
+                positions[i] = max_pos # 首次建仓指定比例
+                entry_price = close_arr[i]
+                stop_loss = entry_price - atr_multi * atr_arr[i-1] # 初始止损线
+        elif current_pos > 0:
+            # 1. 检查是否触发止损 (最低价击穿止损线)
+            if low_arr[i] < stop_loss:
+                positions[i] = 0 # 止损清仓
+                entry_price = 0.0
+            # 2. 检查是否触发常规平仓信号
+            elif sell_signal:
+                positions[i] = 0
+                entry_price = 0.0
+            # 3. 仍在场内，进行移动止损与加仓
+            else:
+                # 动态上移止损线 (Trailing Stop)
+                new_stop = close_arr[i-1] - atr_multi * atr_arr[i-1]
+                if new_stop > stop_loss:
+                    stop_loss = new_stop
+                
+                # 盈利加仓逻辑：如果收盘价突破成本价+1倍ATR，且没满仓，则加满
+                if close_arr[i] > entry_price + atr_arr[i-1] and current_pos < 1.0:
+                    positions[i] = 1.0 
+                    entry_price = close_arr[i] # 更新均价
+                else:
+                    positions[i] = current_pos
+                    
+    df['Position'] = positions
+    df['Trade_Action'] = df['Position'].diff().abs().fillna(0)
+    
+    # 将原来的 df['Signal'] 替换为 df['Position'] 计算资金曲线
+    df['策略每日毛收益'] = df['Position'].shift(1) * df['每日收益率']
     df['策略每日收益'] = df['策略每日毛收益'] - (df['Trade_Action'] * cost)
     df = df.dropna()
     
@@ -94,39 +154,119 @@ def fetch_portfolio_data(symbol_list, start, end):
             pass
     return data_dict
 
-def run_portfolio_strategy(data_dict, fast, slow, m_short, m_long, m_sig, cost):
-    strategy_returns, benchmark_returns = [], []
+def run_portfolio_strategy(data_dict, fast, slow, m_short, m_long, m_sig, cost, atr_period, atr_multi, max_pos):
+    """
+    详尽版多资产投资组合回测引擎
+    包含：完整技术指标计算、单票状态机（ATR动态止损 + 分批加仓）、等权组合汇总
+    """
+    strategy_returns = []
+    benchmark_returns = []
     total_trades = 0
     
+    # 遍历资产池中的每一只股票
     for code, df in data_dict.items():
         temp_df = df.copy()
+        
+        # ================= 1. 基础价格与均线指标 =================
         temp_df['每日收益率'] = temp_df['收盘'].pct_change()
         temp_df['Fast_MA'] = temp_df['收盘'].rolling(window=fast).mean()
         temp_df['Slow_MA'] = temp_df['收盘'].rolling(window=slow).mean()
         
+        # ================= 2. MACD 指标计算 =================
         ema_short = temp_df['收盘'].ewm(span=m_short, adjust=False).mean()
         ema_long = temp_df['收盘'].ewm(span=m_long, adjust=False).mean()
         temp_df['DIF'] = ema_short - ema_long
         temp_df['DEA'] = temp_df['DIF'].ewm(span=m_sig, adjust=False).mean()
         temp_df['MACD_Hist'] = 2 * (temp_df['DIF'] - temp_df['DEA']) 
         
-        temp_df['Signal'] = np.where((temp_df['Fast_MA'] > temp_df['Slow_MA']) & (temp_df['MACD_Hist'] > 0), 1, 0)
-        temp_df['Trade_Action'] = temp_df['Signal'].diff().abs().fillna(0)
-        temp_df['策略每日收益'] = (temp_df['Signal'].shift(1) * temp_df['每日收益率']) - (temp_df['Trade_Action'] * cost)
+        # ================= 3. ATR (真实波动幅度) 计算 =================
+        temp_df['Prev_Close'] = temp_df['收盘'].shift(1)
+        temp_df['TR'] = np.maximum(temp_df['最高'] - temp_df['最低'],
+                        np.maximum(abs(temp_df['最高'] - temp_df['Prev_Close']),
+                                   abs(temp_df['最低'] - temp_df['Prev_Close'])))
+        temp_df['ATR'] = temp_df['TR'].rolling(window=int(atr_period)).mean()
         
+        # ================= 4. 状态机：仓位管理与动态止损 =================
+        # 为了提高回测速度，将 pandas Series 转换为 numpy 数组进行 for 循环计算
+        close_arr = temp_df['收盘'].values
+        low_arr = temp_df['最低'].values
+        fast_ma = temp_df['Fast_MA'].values
+        slow_ma = temp_df['Slow_MA'].values
+        macd_h = temp_df['MACD_Hist'].values
+        atr_arr = temp_df['ATR'].fillna(0).values
+        
+        positions = np.zeros(len(temp_df))
+        entry_price = 0.0
+        stop_loss = 0.0
+        
+        for i in range(1, len(temp_df)):
+            # 信号判定逻辑
+            buy_signal = (fast_ma[i-1] > slow_ma[i-1]) and (macd_h[i-1] > 0)
+            sell_signal = (fast_ma[i-1] < slow_ma[i-1])
+            current_pos = positions[i-1]
+            
+            # --- 空仓状态 ---
+            if current_pos == 0:
+                if buy_signal:
+                    positions[i] = max_pos  # 首次建仓指定比例 (如 0.5)
+                    entry_price = close_arr[i]
+                    stop_loss = entry_price - atr_multi * atr_arr[i-1] # 设定初始止损线
+            
+            # --- 持仓状态 ---
+            elif current_pos > 0:
+                # 检查1：是否被动触发止损 (盘中最低价击穿止损线)
+                if low_arr[i] < stop_loss:
+                    positions[i] = 0  # 止损清仓
+                    entry_price = 0.0
+                    
+                # 检查2：是否主动触发常规平仓 (均线死叉)
+                elif sell_signal:
+                    positions[i] = 0  # 信号平仓
+                    entry_price = 0.0
+                    
+                # 检查3：仍在场内，执行移动止损保护与顺势加仓
+                else:
+                    # 动态上移止损线 (Trailing Stop)：确保止损线只上移，不下降
+                    new_stop = close_arr[i-1] - atr_multi * atr_arr[i-1]
+                    if new_stop > stop_loss:
+                        stop_loss = new_stop
+                    
+                    # 盈利加仓：如果当前收盘价脱离成本区 (超过1倍ATR)，且还有加仓空间，则加满到 1.0
+                    if close_arr[i] > entry_price + atr_arr[i-1] and current_pos < 1.0:
+                        positions[i] = 1.0 
+                        entry_price = close_arr[i] # 动态更新持仓均价
+                    else:
+                        # 保持原仓位
+                        positions[i] = current_pos
+                        
+        # 将 numpy 数组的结果写回 DataFrame
+        temp_df['Position'] = positions
+        temp_df['Trade_Action'] = temp_df['Position'].diff().abs().fillna(0)
+        
+        # ================= 5. 单票收益率计算 =================
+        # 当日收益 = 前一日的持仓比例 * 标的当日涨跌幅 - 交易摩擦成本
+        temp_df['策略每日收益'] = (temp_df['Position'].shift(1) * temp_df['每日收益率']) - (temp_df['Trade_Action'] * cost)
+        
+        # 收集该标的收益序列与换手次数
         strategy_returns.append(temp_df['策略每日收益'].rename(code))
         benchmark_returns.append(temp_df['每日收益率'].rename(code))
         total_trades += temp_df['Trade_Action'].sum()
         
-    if not strategy_returns: return pd.DataFrame()
+    # 如果没有有效数据，直接返回空表
+    if not strategy_returns: 
+        return pd.DataFrame()
     
+    # ================= 6. 组合层面的汇总与统计 =================
     port_df = pd.DataFrame()
+    # 等权重组合：直接将多列收益率横向取平均
     port_df['投资组合每日收益'] = pd.concat(strategy_returns, axis=1).mean(axis=1)
     port_df['基准每日收益 (等权)'] = pd.concat(benchmark_returns, axis=1).mean(axis=1)
     port_df = port_df.dropna()
     
-    if port_df.empty: return port_df
+    if port_df.empty: 
+        return port_df
         
+    # 计算资金曲线与最大回撤
     port_df['基准组合净值'] = (1 + port_df['基准每日收益 (等权)']).cumprod()
     port_df['策略组合净值'] = (1 + port_df['投资组合每日收益']).cumprod()
     port_df['High_Water_Mark'] = port_df['策略组合净值'].cummax()
@@ -134,7 +274,6 @@ def run_portfolio_strategy(data_dict, fast, slow, m_short, m_long, m_sig, cost):
     port_df['Trade_Action_Sum'] = total_trades 
     
     return port_df
-# =========================================================
 
 # 4. 界面展示：双标签页
 tab1, tab2, tab3 = st.tabs(["📑 量化绩效研报", "🤖 智能参数寻优", "🌍 多资产投资组合"])
@@ -144,7 +283,7 @@ data = fetch_global_data(symbol, start_date, end_date)
 with tab1:
     if st.button("▶️ 生成策略研报"):
         if not data.empty:
-            result_df = run_strategy(data, fast_ma_days, slow_ma_days, macd_short, macd_long, macd_signal, trade_cost)
+            result_df = run_strategy(data, fast_ma_days, slow_ma_days, macd_short, macd_long, macd_signal, trade_cost, atr_period, atr_multi, max_pos)
             
             # === 研报级绩效指标计算 ===
             trading_days = len(result_df)
@@ -230,7 +369,7 @@ with tab2:
                         if f >= s: continue # 排除不合理的组合
                         
                         # 调用核心引擎跑回测
-                        result_df = run_strategy(data, f, s, macd_short, macd_long, macd_signal, trade_cost)
+                        result_df = run_strategy(data, f, s, macd_short, macd_long, macd_signal, trade_cost, atr_period, atr_multi, max_pos)
                         
                         if not result_df.empty:
                             # 提取收益与回撤
@@ -294,7 +433,7 @@ with tab3:
             portfolio_data = fetch_portfolio_data(port_symbols, start_date, end_date)
             
             if portfolio_data:
-                port_df = run_portfolio_strategy(portfolio_data, fast_ma_days, slow_ma_days, macd_short, macd_long, macd_signal, trade_cost)
+                port_df = run_portfolio_strategy(portfolio_data, fast_ma_days, slow_ma_days, macd_short, macd_long, macd_signal, trade_cost, atr_period, atr_multi, max_pos)
                 
                 if not port_df.empty:
                     trading_days = len(port_df)
