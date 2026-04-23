@@ -3,6 +3,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import akshare as ak
 import concurrent.futures # 引入并行库
 import time
 
@@ -42,19 +43,61 @@ st.sidebar.header("4. 真实环境模拟")
 cost_rate_input = st.sidebar.number_input("单边交易综合成本 (千分之)", min_value=0.0, max_value=10.0, value=1.0, step=0.1)
 trade_cost = cost_rate_input / 1000.0 
 
-# 3. 数据获取引擎
+# 3. 数据获取引擎 (双引擎智能切换)
 @st.cache_data
 def fetch_global_data(code, start, end):
     try:
-        ticker = yf.Ticker(code)
-        df = ticker.history(start=start, end=end)
-        if not df.empty:
-            df.index = df.index.tz_localize(None)
-            df.rename(columns={'Open': '开盘', 'High': '最高', 'Low': '最低', 'Close': '收盘', 'Volume': '成交量'}, inplace=True)
-            return df[['开盘', '最高', '最低', '收盘', '成交量']]
-        return pd.DataFrame()
+        # 判断是否为 A 股 (带有 .SS 或 .SZ 后缀)
+        if code.endswith(".SS") or code.endswith(".SZ"):
+            pure_code = code.split('.')[0] # 提取纯数字 600519
+            start_str = start.strftime("%Y%m%d")
+            end_str = end.strftime("%Y%m%d")
+            
+            # 使用 akshare 拉取 A 股数据
+            df = ak.stock_zh_a_hist(symbol=pure_code, period="daily", start_date=start_str, end_date=end_str, adjust="qfq")
+            if not df.empty:
+                df = df[['日期', '开盘', '最高', '最低', '收盘', '成交量']]
+                df['日期'] = pd.to_datetime(df['日期'])
+                df.set_index('日期', inplace=True)
+                return df
+            return pd.DataFrame()
+        else:
+            # 美股走 yfinance
+            ticker = yf.Ticker(code)
+            df = ticker.history(start=start, end=end)
+            if not df.empty:
+                df.index = df.index.tz_localize(None)
+                df.rename(columns={'Open': '开盘', 'High': '最高', 'Low': '最低', 'Close': '收盘', 'Volume': '成交量'}, inplace=True)
+                return df[['开盘', '最高', '最低', '收盘', '成交量']]
+            return pd.DataFrame()
     except Exception as e:
         return pd.DataFrame()
+
+@st.cache_data
+def fetch_portfolio_data(symbol_list, start, end):
+    data_dict = {}
+    for code in symbol_list:
+        try:
+            if code.endswith(".SS") or code.endswith(".SZ"):
+                pure_code = code.split('.')[0]
+                start_str = start.strftime("%Y%m%d")
+                end_str = end.strftime("%Y%m%d")
+                df = ak.stock_zh_a_hist(symbol=pure_code, period="daily", start_date=start_str, end_date=end_str, adjust="qfq")
+                if not df.empty:
+                    df = df[['日期', '开盘', '最高', '最低', '收盘', '成交量']]
+                    df['日期'] = pd.to_datetime(df['日期'])
+                    df.set_index('日期', inplace=True)
+                    data_dict[code] = df
+            else:
+                ticker = yf.Ticker(code)
+                df = ticker.history(start=start, end=end)
+                if not df.empty:
+                    df.index = df.index.tz_localize(None)
+                    df.rename(columns={'Open': '开盘', 'High': '最高', 'Low': '最低', 'Close': '收盘', 'Volume': '成交量'}, inplace=True)
+                    data_dict[code] = df[['开盘', '最高', '最低', '收盘', '成交量']]
+        except Exception:
+            pass
+    return data_dict
 
 # 核心计算引擎
 def run_strategy(data_df, fast, slow, m_short, m_long, m_sig, cost, atr_period, atr_multi, max_pos):
