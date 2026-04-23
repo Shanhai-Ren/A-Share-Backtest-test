@@ -78,8 +78,66 @@ def run_strategy(data_df, fast, slow, m_short, m_long, m_sig, cost):
     
     return df
 
+# ================= 新增拼接部分 1：多资产引擎 =================
+@st.cache_data
+def fetch_portfolio_data(symbol_list, start, end):
+    data_dict = {}
+    for code in symbol_list:
+        try:
+            ticker = yf.Ticker(code)
+            df = ticker.history(start=start, end=end)
+            if not df.empty:
+                df.index = df.index.tz_localize(None)
+                df.rename(columns={'Open': '开盘', 'High': '最高', 'Low': '最低', 'Close': '收盘', 'Volume': '成交量'}, inplace=True)
+                data_dict[code] = df[['开盘', '最高', '最低', '收盘', '成交量']]
+        except Exception:
+            pass
+    return data_dict
+
+def run_portfolio_strategy(data_dict, fast, slow, m_short, m_long, m_sig, cost):
+    strategy_returns, benchmark_returns = [], []
+    total_trades = 0
+    
+    for code, df in data_dict.items():
+        temp_df = df.copy()
+        temp_df['每日收益率'] = temp_df['收盘'].pct_change()
+        temp_df['Fast_MA'] = temp_df['收盘'].rolling(window=fast).mean()
+        temp_df['Slow_MA'] = temp_df['收盘'].rolling(window=slow).mean()
+        
+        ema_short = temp_df['收盘'].ewm(span=m_short, adjust=False).mean()
+        ema_long = temp_df['收盘'].ewm(span=m_long, adjust=False).mean()
+        temp_df['DIF'] = ema_short - ema_long
+        temp_df['DEA'] = temp_df['DIF'].ewm(span=m_sig, adjust=False).mean()
+        temp_df['MACD_Hist'] = 2 * (temp_df['DIF'] - temp_df['DEA']) 
+        
+        temp_df['Signal'] = np.where((temp_df['Fast_MA'] > temp_df['Slow_MA']) & (temp_df['MACD_Hist'] > 0), 1, 0)
+        temp_df['Trade_Action'] = temp_df['Signal'].diff().abs().fillna(0)
+        temp_df['策略每日收益'] = (temp_df['Signal'].shift(1) * temp_df['每日收益率']) - (temp_df['Trade_Action'] * cost)
+        
+        strategy_returns.append(temp_df['策略每日收益'].rename(code))
+        benchmark_returns.append(temp_df['每日收益率'].rename(code))
+        total_trades += temp_df['Trade_Action'].sum()
+        
+    if not strategy_returns: return pd.DataFrame()
+    
+    port_df = pd.DataFrame()
+    port_df['投资组合每日收益'] = pd.concat(strategy_returns, axis=1).mean(axis=1)
+    port_df['基准每日收益 (等权)'] = pd.concat(benchmark_returns, axis=1).mean(axis=1)
+    port_df = port_df.dropna()
+    
+    if port_df.empty: return port_df
+        
+    port_df['基准组合净值'] = (1 + port_df['基准每日收益 (等权)']).cumprod()
+    port_df['策略组合净值'] = (1 + port_df['投资组合每日收益']).cumprod()
+    port_df['High_Water_Mark'] = port_df['策略组合净值'].cummax()
+    port_df['Drawdown'] = (port_df['策略组合净值'] - port_df['High_Water_Mark']) / port_df['High_Water_Mark']
+    port_df['Trade_Action_Sum'] = total_trades 
+    
+    return port_df
+# =========================================================
+
 # 4. 界面展示：双标签页
-tab1, tab2 = st.tabs(["📑 量化绩效研报", "🤖 智能参数寻优"])
+tab1, tab2, tab3 = st.tabs(["📑 量化绩效研报", "🤖 智能参数寻优", "🌍 多资产投资组合"])
 
 data = fetch_global_data(symbol, start_date, end_date)
 
@@ -214,3 +272,51 @@ with tab2:
                 st.info(f"💡 **结论建议：** 综合收益与抗风险能力，当前标的在扣除手续费后的历史最优搭配为 **{best_fast}日线 / {best_slow}日线** (夏普比率 {best_sharpe})。")
         else:
             st.error("请先确认左侧数据能够正常拉取。")
+
+# ================= 部分 3：Tab3 组合管理页面 =================
+with tab3:
+    st.markdown("### 🌍 多资产投资组合等权重回测")
+    st.write("在下方输入多只股票代码，系统将自动分配等额度资金，并对冲单一标的的极端风险。")
+    
+    port_symbols_input = st.text_input("输入资产池代码 (用英文逗号隔开，支持A股纯数字或美股代码)：", "AAPL, MSFT, NVDA")
+    
+    if st.button("▶️ 运行多资产组合回测"):
+        # 智能处理输入的代码后缀
+        raw_symbols = [s.strip() for s in port_symbols_input.split(",") if s.strip()]
+        port_symbols = []
+        for s in raw_symbols:
+            if s.isdigit() and len(s) == 6:
+                port_symbols.append(f"{s}.SS" if s.startswith("6") else f"{s}.SZ")
+            else:
+                port_symbols.append(s.upper())
+                
+        with st.spinner(f"正在拉取 {len(port_symbols)} 只标的数据进行矩阵运算..."):
+            portfolio_data = fetch_portfolio_data(port_symbols, start_date, end_date)
+            
+            if portfolio_data:
+                port_df = run_portfolio_strategy(portfolio_data, fast_ma_days, slow_ma_days, macd_short, macd_long, macd_signal, trade_cost)
+                
+                if not port_df.empty:
+                    trading_days = len(port_df)
+                    years = trading_days / 252
+                    strat_ret = (port_df['策略组合净值'].iloc[-1] - 1)
+                    base_ret = (port_df['基准组合净值'].iloc[-1] - 1)
+                    
+                    daily_mean = port_df['投资组合每日收益'].mean()
+                    daily_std = port_df['投资组合每日收益'].std()
+                    sharpe_ratio = (daily_mean / daily_std) * np.sqrt(252) if daily_std != 0 else 0
+                    
+                    st.success(f"组合回测完成！有效拉取了 {len(portfolio_data)} 只标的。")
+                    
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("组合策略累计收益", f"{strat_ret*100:.2f}%", f"等权基准: {base_ret*100:.2f}%")
+                    c2.metric("组合夏普比率", f"{sharpe_ratio:.2f}")
+                    c3.metric("组合极限回撤", f"{port_df['Drawdown'].min()*100:.2f}%")
+                    c4.metric("总交易换手次数", f"{int(port_df['Trade_Action_Sum'].iloc[0])} 次")
+                    
+                    st.line_chart(port_df[['基准组合净值', '策略组合净值']])
+                    st.area_chart(port_df['Drawdown'] * 100)
+                else:
+                    st.error("数据计算异常。")
+            else:
+                st.error("无法获取你输入的任何标的数据，请检查代码拼写。")
