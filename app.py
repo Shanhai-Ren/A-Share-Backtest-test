@@ -157,5 +157,60 @@ with tab1:
 
 with tab2:
     st.markdown("### 🔍 寻找抗磨损的最优均线组合 (含夏普评估)")
-    # (保留你之前的网格搜索逻辑，只需将 run_strategy 的返回值接好即可，为节约篇幅此处省略)
-    st.info("如需在此页面也加上夏普比率的排序，可在循环中提取计算好的 Sharpe 字段。")
+    st.write(f"系统将在扣除 **{cost_rate_input}‰** 摩擦成本的前提下，自动遍历不同的均线组合，并计算风险回报比。")
+    
+    if st.button("🚀 开始全自动参数寻优"):
+        if not data.empty:
+            with st.spinner("正在启动矩阵运算，遍历历史数据..."):
+                results = []
+                # 测试参数范围：快线 5-15，慢线 20-60
+                fast_options = [5, 10, 15]
+                slow_options = [20, 30, 40, 60]
+                
+                for f in fast_options:
+                    for s in slow_options:
+                        if f >= s: continue # 排除不合理的组合
+                        
+                        # 调用核心引擎跑回测
+                        result_df = run_strategy(data, f, s, macd_short, macd_long, macd_signal, trade_cost)
+                        
+                        if not result_df.empty:
+                            # 提取收益与回撤
+                            strat_ret = (result_df['策略净值'].iloc[-1] - 1) * 100
+                            max_dd = result_df['Drawdown'].min() * 100
+                            trades = result_df['Trade_Action'].sum()
+                            
+                            # 计算夏普比率 (核心风控指标)
+                            daily_mean = result_df['策略每日收益'].mean()
+                            daily_std = result_df['策略每日收益'].std()
+                            sharpe = (daily_mean / daily_std) * np.sqrt(252) if daily_std != 0 else 0
+                            
+                            results.append({
+                                "快线 (天)": f,
+                                "慢线 (天)": s,
+                                "净收益率 (%)": round(strat_ret, 2),
+                                "最大回撤 (%)": round(max_dd, 2),
+                                "夏普比率": round(sharpe, 2), # 新增夏普字段
+                                "交易次数": int(trades)
+                            })
+                
+                # 将结果转为数据表，这次按【夏普比率】从高到低排序
+                results_df = pd.DataFrame(results).sort_values(by="夏普比率", ascending=False)
+                results_df.reset_index(drop=True, inplace=True)
+                
+                st.success("寻优完成！以下是按【夏普比率】排名的最强参数组合：")
+                
+                # 高亮显示表现最好的数值
+                st.dataframe(
+                    results_df.style.highlight_max(subset=['夏普比率', '净收益率 (%)'], color='lightgreen')
+                                    .highlight_min(subset=['最大回撤 (%)'], color='lightcoral'),
+                    use_container_width=True
+                )
+                
+                best_fast = results_df.iloc[0]['快线 (天)']
+                best_slow = results_df.iloc[0]['慢线 (天)']
+                best_sharpe = results_df.iloc[0]['夏普比率']
+                
+                st.info(f"💡 **结论建议：** 综合收益与抗风险能力，当前标的在扣除手续费后的历史最优搭配为 **{best_fast}日线 / {best_slow}日线** (夏普比率 {best_sharpe})。")
+        else:
+            st.error("请先确认左侧数据能够正常拉取。")
