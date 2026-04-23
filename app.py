@@ -3,6 +3,8 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import concurrent.futures # 引入并行库
+import time
 
 # 1. 网页标题与布局设置
 st.set_page_config(page_title="全球市场量化研报", layout="wide")
@@ -404,63 +406,102 @@ with tab1:
         else:
             st.error("获取数据失败，请检查代码。")
 
-with tab2:
-    st.markdown("### 🔍 寻找抗磨损的最优均线组合 (含夏普评估)")
-    st.write(f"系统将在扣除 **{cost_rate_input}‰** 摩擦成本的前提下，自动遍历不同的均线组合，并计算风险回报比。")
+# 定义一个用于并行的包装函数 (必须放在全局，方便子进程序列化)
+def worker_backtest(args):
+    """
+    单次参数组合的并行任务
+    args 包含: data, f, s, m_short, m_long, m_sig, cost, atr_p, atr_m, m_pos
+    """
+    data, f, s, m_short, m_long, m_sig, cost, atr_p, atr_m, m_pos = args
+    # 调用你之前写好的详尽版单资产引擎 run_strategy
+    res_df = run_strategy(data, f, s, m_short, m_long, m_sig, cost, atr_p, atr_m, m_pos)
     
-    if st.button("🚀 开始全自动参数寻优"):
+    if res_df.empty:
+        return None
+    
+    # 提取核心指标返回，减少子进程到主进程的数据传输量
+    strat_ret = (res_df['策略净值'].iloc[-1] - 1) * 100
+    max_dd = res_df['Drawdown'].min() * 100
+    daily_mean = res_df['策略每日收益'].mean()
+    daily_std = res_df['策略每日收益'].std()
+    sharpe = (daily_mean / daily_std) * np.sqrt(252) if daily_std != 0 else 0
+    trades = res_df['Trade_Action'].sum()
+    
+    return {
+        "快线 (天)": f,
+        "慢线 (天)": s,
+        "净收益率 (%)": round(strat_ret, 2),
+        "最大回撤 (%)": round(max_dd, 2),
+        "夏普比率": round(sharpe, 2),
+        "交易次数": int(trades)
+    }
+
+with tab2:
+    st.markdown("### 🔍 参数矩阵全核心寻优 (多进程加速)")
+    st.info("系统将启动多进程并行计算，利用 CPU 所有核心同时回测。")
+
+    # 1. 寻优范围配置
+    c1, c2 = st.columns(2)
+    with c1:
+        fast_range = st.slider("快线搜索范围", 3, 30, (5, 15))
+        slow_range = st.slider("慢线搜索范围", 20, 120, (20, 60))
+    with c2:
+        step = st.number_input("搜索步长 (天)", min_value=1, value=2)
+
+    if st.button("🚀 启动全速寻优"):
         if not data.empty:
-            with st.spinner("正在启动矩阵运算，遍历历史数据..."):
-                results = []
-                # 测试参数范围：快线 5-15，慢线 20-60
-                fast_options = [5, 10, 15]
-                slow_options = [20, 30, 40, 60]
+            # 构建待测试的参数列表
+            param_list = []
+            for f in range(fast_range[0], fast_range[1] + 1, step):
+                for s in range(slow_range[0], slow_range[1] + 1, step):
+                    if f >= s: continue
+                    # 打包所有参数
+                    param_list.append((data, f, s, macd_short, macd_long, macd_signal, 
+                                      trade_cost, atr_period, atr_multi, max_pos))
+            
+            total_tasks = len(param_list)
+            st.write(f"📊 总计待计算组合数: **{total_tasks}**")
+            
+            # 2. 初始化进度条
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            start_time = time.time()
+            
+            final_results = []
+            
+            # 3. 使用多进程池
+            # max_workers 留一个核心给系统，其他全开
+            with concurrent.futures.ProcessPoolExecutor() as executor:
+                # 提交所有任务
+                futures = [executor.submit(worker_backtest, p) for p in param_list]
                 
-                for f in fast_options:
-                    for s in slow_options:
-                        if f >= s: continue # 排除不合理的组合
-                        
-                        # 调用核心引擎跑回测
-                        result_df = run_strategy(data, f, s, macd_short, macd_long, macd_signal, trade_cost, atr_period, atr_multi, max_pos)
-                        
-                        if not result_df.empty:
-                            # 提取收益与回撤
-                            strat_ret = (result_df['策略净值'].iloc[-1] - 1) * 100
-                            max_dd = result_df['Drawdown'].min() * 100
-                            trades = result_df['Trade_Action'].sum()
-                            
-                            # 计算夏普比率 (核心风控指标)
-                            daily_mean = result_df['策略每日收益'].mean()
-                            daily_std = result_df['策略每日收益'].std()
-                            sharpe = (daily_mean / daily_std) * np.sqrt(252) if daily_std != 0 else 0
-                            
-                            results.append({
-                                "快线 (天)": f,
-                                "慢线 (天)": s,
-                                "净收益率 (%)": round(strat_ret, 2),
-                                "最大回撤 (%)": round(max_dd, 2),
-                                "夏普比率": round(sharpe, 2), # 新增夏普字段
-                                "交易次数": int(trades)
-                            })
-                
-                # 将结果转为数据表，这次按【夏普比率】从高到低排序
-                results_df = pd.DataFrame(results).sort_values(by="夏普比率", ascending=False)
+                # 实时获取结果更新进度
+                for i, future in enumerate(concurrent.futures.as_completed(futures)):
+                    res = future.result()
+                    if res:
+                        final_results.append(res)
+                    
+                    # 更新进度条
+                    pct = int((i + 1) / total_tasks * 100)
+                    progress_bar.progress(pct)
+                    status_text.text(f"已完成: {i+1}/{total_tasks} 组合 | 耗时: {time.time()-start_time:.1f}s")
+
+            # 4. 展示结果
+            if final_results:
+                results_df = pd.DataFrame(final_results).sort_values(by="夏普比率", ascending=False)
                 results_df.reset_index(drop=True, inplace=True)
                 
-                st.success("寻优完成！以下是按【夏普比率】排名的最强参数组合：")
-                
-                # 高亮显示表现最好的数值
+                st.success(f"⚡ 寻优完成！总耗时: {time.time()-start_time:.1f} 秒")
                 st.dataframe(
                     results_df.style.highlight_max(subset=['夏普比率', '净收益率 (%)'], color='lightgreen')
                                     .highlight_min(subset=['最大回撤 (%)'], color='lightcoral'),
                     use_container_width=True
                 )
                 
-                best_fast = results_df.iloc[0]['快线 (天)']
-                best_slow = results_df.iloc[0]['慢线 (天)']
-                best_sharpe = results_df.iloc[0]['夏普比率']
-                
-                st.info(f"💡 **结论建议：** 综合收益与抗风险能力，当前标的在扣除手续费后的历史最优搭配为 **{best_fast}日线 / {best_slow}日线** (夏普比率 {best_sharpe})。")
+                # 给出最优建议
+                best = results_df.iloc[0]
+                st.balloons()
+                st.info(f"💡 **最优配置：** 快线 {int(best['快线 (天)'])} / 慢线 {int(best['慢线 (天)'])} | 夏普: {best['夏普比率']}")
         else:
             st.error("请先确认左侧数据能够正常拉取。")
 
