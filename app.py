@@ -9,6 +9,11 @@ import time
 # 1. 网页标题与布局设置
 st.set_page_config(page_title="全球市场量化研报", layout="wide")
 st.title("🌍 专业量化回测与绩效研报系统")
+# Session State 缓存初始化
+if 'history_reports' not in st.session_state:
+    st.session_state['history_reports'] = {} # 用于存放历次运行的结果 DataFrame
+if 'current_report_key' not in st.session_state:
+    st.session_state['current_report_key'] = None # 记录当前页面正在展示哪一份研报
 
 # 2. 侧边栏：参数输入
 st.sidebar.header("1. 基础参数")
@@ -319,92 +324,135 @@ def run_portfolio_strategy(data_dict, fast, slow, m_short, m_long, m_sig, cost, 
     
     return port_df
 
+# 侧边栏研报缓存管理
+st.sidebar.markdown("---")
+st.sidebar.header("🗂️ 研报历史与对比")
+
+if st.session_state['history_reports']:
+    # 使用下拉菜单让用户自由切换看过的研报
+    report_keys = list(st.session_state['history_reports'].keys())
+    current_index = report_keys.index(st.session_state['current_report_key']) if st.session_state['current_report_key'] in report_keys else 0
+    
+    selected_key = st.sidebar.selectbox("查看历史研报", options=report_keys, index=current_index)
+    
+    # 侦测到用户切换了历史记录，立刻刷新页面展示
+    if selected_key != st.session_state['current_report_key']:
+        st.session_state['current_report_key'] = selected_key
+        st.rerun() # 强制重新运行以刷新视图
+
+    # 提供一键清空功能
+    if st.sidebar.button("🗑️ 清空缓存"):
+        st.session_state['history_reports'] = {}
+        st.session_state['current_report_key'] = None
+        st.rerun()
+else:
+    st.sidebar.info("暂无缓存，请先在右侧生成研报。")
+
 # 4. 界面展示：双标签页
 tab1, tab2, tab3 = st.tabs(["📑 量化绩效研报", "🤖 智能参数寻优", "🌍 多资产投资组合"])
 
 data = fetch_global_data(symbol, start_date, end_date)
 
 with tab1:
+    # --- 动作：只负责计算和存入缓存 ---
     if st.button("▶️ 生成策略研报"):
         if not data.empty:
-            result_df = run_strategy(data, fast_ma_days, slow_ma_days, macd_short, macd_long, macd_signal, trade_cost, atr_period, atr_multi, max_pos)
-            
-            # === 研报级绩效指标计算 ===
-            trading_days = len(result_df)
-            years = trading_days / 252
-            
-            # 累计收益
-            strat_ret = (result_df['策略净值'].iloc[-1] - 1)
-            base_ret = (result_df['基准净值'].iloc[-1] - 1)
-            
-            # 年化收益 (CAGR)
-            ann_strat_ret = ((1 + strat_ret) ** (1 / years) - 1) if years > 0 else 0
-            
-            # 夏普比率 (假设无风险利率为 0)
-            daily_mean = result_df['策略每日收益'].mean()
-            daily_std = result_df['策略每日收益'].std()
-            sharpe_ratio = (daily_mean / daily_std) * np.sqrt(252) if daily_std != 0 else 0
-            
-            # 索提诺比率 (仅计算亏损日的标准差)
-            downside_returns = result_df[result_df['策略每日收益'] < 0]['策略每日收益']
-            downside_std = downside_returns.std()
-            sortino_ratio = (daily_mean / downside_std) * np.sqrt(252) if downside_std != 0 else 0
-            
-            max_dd = result_df['Drawdown'].min()
-            total_trades = result_df['Trade_Action'].sum()
-            
-            st.success("研报生成完毕！")
-            
-            # --- 第一部分：核心指标看板 ---
-            st.markdown("### 🔬 核心量化指标 (Alpha & Risk)")
-            m1, m2, m3, m4, m5 = st.columns(5)
-            m1.metric("策略累计净收益", f"{strat_ret*100:.2f}%", f"基准: {base_ret*100:.2f}%")
-            m2.metric("年化收益率 (CAGR)", f"{ann_strat_ret*100:.2f}%")
-            m3.metric("极限最大回撤", f"{max_dd*100:.2f}%", delta="风控指标", delta_color="inverse")
-            m4.metric("夏普比率 (Sharpe)", f"{sharpe_ratio:.2f}", "每单位总风险收益")
-            m5.metric("索提诺比率 (Sortino)", f"{sortino_ratio:.2f}", "每单位下行风险收益")
-            
-            # === 新增：交易灵魂统计看板 ===
-            win_rate, pl_ratio, max_cons_losses, total_rounds, avg_win, avg_loss = calculate_trade_stats(result_df)
-            
-            st.markdown("### 🎯 核心交易统计 (Trade Statistics)")
-            t1, t2, t3, t4 = st.columns(4)
-            t1.metric("策略胜率 (Win Rate)", f"{win_rate*100:.1f}%", "趋势跟踪通常胜率<50%")
-            t2.metric("盈亏比 (P/L Ratio)", f"{pl_ratio:.2f}", f"均赚 {avg_win*100:.1f}% / 均亏 {avg_loss*100:.1f}%")
-            t3.metric("最大连亏次数", f"{max_cons_losses} 次", delta="实盘心理抗压阀值", delta_color="inverse")
-            t4.metric("完整交易轮次", f"{total_rounds} 轮", f"换手操作: {int(total_trades)} 次")
-            
-            st.markdown("---")
-            
-            # --- 第二部分：净值与回撤图 ---
-            col1, col2 = st.columns([2, 1])
-            with col1:
-                st.markdown("#### 📈 资金净值走势图 (已扣除交易成本)")
-                st.line_chart(result_df[['基准净值', '策略净值']])
-                st.markdown("#### 📉 动态回撤面积图")
-                st.area_chart(result_df['Drawdown'] * 100)
+            with st.spinner("正在进行量化回测计算..."):
+                result_df = run_strategy(data, fast_ma_days, slow_ma_days, macd_short, macd_long, macd_signal, trade_cost, atr_period, atr_multi, max_pos)
                 
-            with col2:
-                # --- 第三部分：月度收益热力图 ---
-                st.markdown("#### 📅 策略月度收益分布表")
-                # 计算每月的收益率
-                result_df['Year'] = result_df.index.year
-                result_df['Month'] = result_df.index.month
+                # 为这一次的回测生成一个独一无二的名称
+                run_time = time.strftime("%H:%M:%S")
+                report_name = f"{symbol} | 均线{fast_ma_days}-{slow_ma_days} | {run_time}"
                 
-                # 月度累计收益率 = 当月连乘
-                monthly_ret = result_df.groupby(['Year', 'Month'])['策略每日收益'].apply(lambda x: (1 + x).prod() - 1).unstack()
-                
-                # 使用 Pandas Styler 生成高大上的热力图表
-                styled_monthly = monthly_ret.style.format("{:.2%}", na_rep="-") \
-                    .background_gradient(cmap='RdYlGn', axis=None, vmin=-0.15, vmax=0.15) \
-                    .highlight_null(color='#f0f2f6')
-                
-                st.dataframe(styled_monthly, use_container_width=True, height=400)
-                
-                st.info(f"💡 **交易摘要：** 回测区间内共发生 **{int(total_trades)}** 次买卖操作。按单边 {cost_rate_input}‰ 计算，累计付出的摩擦成本约占本金的 **{total_trades * cost_rate_input:.1f}‰**。")
-
+                # 存进档案库，并将当前指针指向它
+                st.session_state['history_reports'][report_name] = result_df
+                st.session_state['current_report_key'] = report_name
         else:
             st.error("获取数据失败，请检查代码。")
+
+    # --- 展示：不管是不是刚点的按钮，只要有缓存，就拿出来展示 ---
+    if st.session_state['current_report_key'] and st.session_state['current_report_key'] in st.session_state['history_reports']:
+        # 取出缓存的 DataFrame
+        result_df = st.session_state['history_reports'][st.session_state['current_report_key']]
+        
+        st.success(f"📑 当前正在展示：**{st.session_state['current_report_key']}**")
+        
+        # === 研报级绩效指标计算 ===
+        trading_days = len(result_df)
+        years = trading_days / 252
+        
+        # 累计收益
+        strat_ret = (result_df['策略净值'].iloc[-1] - 1)
+        base_ret = (result_df['基准净值'].iloc[-1] - 1)
+        
+        # 年化收益 (CAGR)
+        ann_strat_ret = ((1 + strat_ret) ** (1 / years) - 1) if years > 0 else 0
+        
+        # 夏普比率 (假设无风险利率为 0)
+        daily_mean = result_df['策略每日收益'].mean()
+        daily_std = result_df['策略每日收益'].std()
+        sharpe_ratio = (daily_mean / daily_std) * np.sqrt(252) if daily_std != 0 else 0
+        
+        # 索提诺比率 (仅计算亏损日的标准差)
+        downside_returns = result_df[result_df['策略每日收益'] < 0]['策略每日收益']
+        downside_std = downside_returns.std()
+        sortino_ratio = (daily_mean / downside_std) * np.sqrt(252) if downside_std != 0 else 0
+        
+        max_dd = result_df['Drawdown'].min()
+        total_trades = result_df['Trade_Action'].sum()
+        
+        st.success("研报生成完毕！")
+        
+        # --- 第一部分：核心指标看板 ---
+        st.markdown("### 🔬 核心量化指标 (Alpha & Risk)")
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("策略累计净收益", f"{strat_ret*100:.2f}%", f"基准: {base_ret*100:.2f}%")
+        m2.metric("年化收益率 (CAGR)", f"{ann_strat_ret*100:.2f}%")
+        m3.metric("极限最大回撤", f"{max_dd*100:.2f}%", delta="风控指标", delta_color="inverse")
+        m4.metric("夏普比率 (Sharpe)", f"{sharpe_ratio:.2f}", "每单位总风险收益")
+        m5.metric("索提诺比率 (Sortino)", f"{sortino_ratio:.2f}", "每单位下行风险收益")
+        
+        # === 新增：交易灵魂统计看板 ===
+        win_rate, pl_ratio, max_cons_losses, total_rounds, avg_win, avg_loss = calculate_trade_stats(result_df)
+        
+        st.markdown("### 🎯 核心交易统计 (Trade Statistics)")
+        t1, t2, t3, t4 = st.columns(4)
+        t1.metric("策略胜率 (Win Rate)", f"{win_rate*100:.1f}%", "趋势跟踪通常胜率<50%")
+        t2.metric("盈亏比 (P/L Ratio)", f"{pl_ratio:.2f}", f"均赚 {avg_win*100:.1f}% / 均亏 {avg_loss*100:.1f}%")
+        t3.metric("最大连亏次数", f"{max_cons_losses} 次", delta="实盘心理抗压阀值", delta_color="inverse")
+        t4.metric("完整交易轮次", f"{total_rounds} 轮", f"换手操作: {int(total_trades)} 次")
+        
+        st.markdown("---")
+        
+        # --- 第二部分：净值与回撤图 ---
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            st.markdown("#### 📈 资金净值走势图 (已扣除交易成本)")
+            st.line_chart(result_df[['基准净值', '策略净值']])
+            st.markdown("#### 📉 动态回撤面积图")
+            st.area_chart(result_df['Drawdown'] * 100)
+            
+        with col2:
+            # --- 第三部分：月度收益热力图 ---
+            st.markdown("#### 📅 策略月度收益分布表")
+            # 计算每月的收益率
+            result_df['Year'] = result_df.index.year
+            result_df['Month'] = result_df.index.month
+            
+            # 月度累计收益率 = 当月连乘
+            monthly_ret = result_df.groupby(['Year', 'Month'])['策略每日收益'].apply(lambda x: (1 + x).prod() - 1).unstack()
+            
+            # 使用 Pandas Styler 生成高大上的热力图表
+            styled_monthly = monthly_ret.style.format("{:.2%}", na_rep="-") \
+                .background_gradient(cmap='RdYlGn', axis=None, vmin=-0.15, vmax=0.15) \
+                .highlight_null(color='#f0f2f6')
+            
+            st.dataframe(styled_monthly, use_container_width=True, height=400)
+            
+            st.info(f"💡 **交易摘要：** 回测区间内共发生 **{int(total_trades)}** 次买卖操作。按单边 {cost_rate_input}‰ 计算，累计付出的摩擦成本约占本金的 **{total_trades * cost_rate_input:.1f}‰**。")
+
+    else:
+        st.error("获取数据失败，请检查代码。")
 
 # 定义一个用于并行的包装函数 (必须放在全局，方便子进程序列化)
 def worker_backtest(args):
