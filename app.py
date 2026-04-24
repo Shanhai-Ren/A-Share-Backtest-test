@@ -17,14 +17,14 @@ if 'current_report_key' not in st.session_state:
 
 # 2. 侧边栏：参数输入
 st.sidebar.header("1. 基础参数")
-market_choice = st.sidebar.radio("选择交易市场", ["A股 (沪深)", "美股 (NASDAQ/NYSE)"])
+# market_choice = st.sidebar.radio("选择交易市场", ["A股 (沪深)", "美股 (NASDAQ/NYSE)"])
+# if market_choice == "A股 (沪深)":
+#     symbol_input = st.sidebar.text_input("输入A股代码 (如: 600519)", "600519")
+#     symbol = f"{symbol_input}.SS" if symbol_input.startswith("6") else f"{symbol_input}.SZ"
+# else:
+#     symbol = st.sidebar.text_input("输入美股代码 (如: AAPL)", "AAPL")
 
-if market_choice == "A股 (沪深)":
-    symbol_input = st.sidebar.text_input("输入A股代码 (如: 600519)", "600519")
-    symbol = f"{symbol_input}.SS" if symbol_input.startswith("6") else f"{symbol_input}.SZ"
-else:
-    symbol = st.sidebar.text_input("输入美股代码 (如: AAPL)", "AAPL")
-
+# 只保留全局的日期控制，因为三个 Tab 都会用到日期
 start_date = st.sidebar.date_input("开始日期", pd.to_datetime("2021-01-01"))
 end_date = st.sidebar.date_input("结束日期", pd.to_datetime("today"))
 
@@ -351,24 +351,36 @@ else:
 # 4. 界面展示：双标签页
 tab1, tab2, tab3 = st.tabs(["📑 量化绩效研报", "🤖 智能参数寻优", "🌍 多资产投资组合"])
 
-data = fetch_global_data(symbol, start_date, end_date)
-
 with tab1:
-    # --- 动作：只负责计算和存入缓存 ---
+    st.markdown("### 🎯 设定分析标的")
+    # 用两列排版，显得更紧凑好看
+    col1, col2 = st.columns([1, 2])
+    market_choice_1 = col1.selectbox("选择交易市场", ["A股 (沪深)", "美股 (NASDAQ/NYSE)"], key="t1_m")
+    
+    if market_choice_1 == "A股 (沪深)":
+        sym_input_1 = col2.text_input("输入A股代码 (如: 600519)", "600519", key="t1_s")
+        symbol_1 = f"{sym_input_1}.SS" if sym_input_1.startswith("6") else f"{sym_input_1}.SZ"
+    else:
+        symbol_1 = col2.text_input("输入美股代码 (如: AAPL)", "AAPL", key="t1_s")
+
+    # --- 动作：点击按钮后，拉取数据、计算并存入缓存 ---
     if st.button("▶️ 生成策略研报"):
+        # 数据拉取移到了这里！且使用的是当前 tab 专属的 symbol_1
+        data = fetch_global_data(symbol_1, start_date, end_date) 
+        
         if not data.empty:
             with st.spinner("正在进行量化回测计算..."):
                 result_df = run_strategy(data, fast_ma_days, slow_ma_days, macd_short, macd_long, macd_signal, trade_cost, atr_period, atr_multi, max_pos)
                 
                 # 为这一次的回测生成一个独一无二的名称
                 run_time = time.strftime("%H:%M:%S")
-                report_name = f"{symbol} | 均线{fast_ma_days}-{slow_ma_days} | {run_time}"
+                report_name = f"{symbol_1} | 均线{fast_ma_days}-{slow_ma_days} | {run_time}"
                 
                 # 存进档案库，并将当前指针指向它
                 st.session_state['history_reports'][report_name] = result_df
                 st.session_state['current_report_key'] = report_name
         else:
-            st.error("获取数据失败，请检查代码。")
+            st.error("获取数据失败，请检查代码或网络。")
 
     # --- 展示：不管是不是刚点的按钮，只要有缓存，就拿出来展示 ---
     if st.session_state['current_report_key'] and st.session_state['current_report_key'] in st.session_state['history_reports']:
@@ -400,8 +412,6 @@ with tab1:
         
         max_dd = result_df['Drawdown'].min()
         total_trades = result_df['Trade_Action'].sum()
-        
-        st.success("研报生成完毕！")
         
         # --- 第一部分：核心指标看板 ---
         st.markdown("### 🔬 核心量化指标 (Alpha & Risk)")
@@ -442,7 +452,7 @@ with tab1:
             # 月度累计收益率 = 当月连乘
             monthly_ret = result_df.groupby(['Year', 'Month'])['策略每日收益'].apply(lambda x: (1 + x).prod() - 1).unstack()
             
-            # 使用 Pandas Styler 生成高大上的热力图表
+            # 使用 Pandas Styler 生成热力图表
             styled_monthly = monthly_ret.style.format("{:.2%}", na_rep="-") \
                 .background_gradient(cmap='RdYlGn', axis=None, vmin=-0.15, vmax=0.15) \
                 .highlight_null(color='#f0f2f6')
@@ -450,9 +460,6 @@ with tab1:
             st.dataframe(styled_monthly, use_container_width=True, height=400)
             
             st.info(f"💡 **交易摘要：** 回测区间内共发生 **{int(total_trades)}** 次买卖操作。按单边 {cost_rate_input}‰ 计算，累计付出的摩擦成本约占本金的 **{total_trades * cost_rate_input:.1f}‰**。")
-
-    else:
-        st.error("获取数据失败，请检查代码。")
 
 # 定义一个用于并行的包装函数 (必须放在全局，方便子进程序列化)
 def worker_backtest(args):
@@ -485,6 +492,17 @@ def worker_backtest(args):
     }
 
 with tab2:
+    st.markdown("### 🎯 设定待寻优标的")
+    col1, col2 = st.columns([1, 2])
+    market_choice_2 = col1.selectbox("选择交易市场", ["A股 (沪深)", "美股 (NASDAQ/NYSE)"], key="t2_m")
+    
+    if market_choice_2 == "A股 (沪深)":
+        sym_input_2 = col2.text_input("输入A股代码 (如: 600519)", "600519", key="t2_s")
+        symbol_2 = f"{sym_input_2}.SS" if sym_input_2.startswith("6") else f"{sym_input_2}.SZ"
+    else:
+        symbol_2 = col2.text_input("输入美股代码 (如: AAPL)", "AAPL", key="t2_s")
+
+    st.markdown("---")
     st.markdown("### 🔍 参数矩阵全核心寻优 (多进程加速)")
     st.info("系统将启动多进程并行计算，利用 CPU 所有核心同时回测。")
 
@@ -497,13 +515,16 @@ with tab2:
         step = st.number_input("搜索步长 (天)", min_value=1, value=2)
 
     if st.button("🚀 启动全速寻优"):
+        # 数据拉取移到了按钮内部，并且使用的是 tab 2 专属的 symbol_2
+        data = fetch_global_data(symbol_2, start_date, end_date)
+        
         if not data.empty:
             # 构建待测试的参数列表
             param_list = []
             for f in range(fast_range[0], fast_range[1] + 1, step):
                 for s in range(slow_range[0], slow_range[1] + 1, step):
                     if f >= s: continue
-                    # 打包所有参数
+                    # 打包所有参数，传入刚才拉取到的 data
                     param_list.append((data, f, s, macd_short, macd_long, macd_signal, 
                                       trade_cost, atr_period, atr_multi, max_pos))
             
@@ -518,7 +539,6 @@ with tab2:
             final_results = []
             
             # 3. 使用多进程池
-            # max_workers 留一个核心给系统，其他全开
             with concurrent.futures.ProcessPoolExecutor() as executor:
                 # 提交所有任务
                 futures = [executor.submit(worker_backtest, p) for p in param_list]
@@ -551,7 +571,7 @@ with tab2:
                 st.balloons()
                 st.info(f"💡 **最优配置：** 快线 {int(best['快线 (天)'])} / 慢线 {int(best['慢线 (天)'])} | 夏普: {best['夏普比率']}")
         else:
-            st.error("请先确认左侧数据能够正常拉取。")
+            st.error("无法获取你输入的标的数据，请检查代码拼写。")
 
 # ================= 部分 3：Tab3 组合管理页面 =================
 with tab3:
