@@ -1,5 +1,8 @@
 streamlit
-yfinance
 pandas
 numpy
 matplotlib
+yfinance
+akshare
+scipy
+requests
