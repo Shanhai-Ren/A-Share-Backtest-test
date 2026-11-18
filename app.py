@@ -32,6 +32,7 @@ from dataclasses import dataclass, asdict
 import numpy as np
 import pandas as pd
 import streamlit as st
+from ui_text import english_label, t, display_frame, display_formats, display_report_name
 import matplotlib
 matplotlib.use("Agg")                     # 云端无显示设备，必须在 import pyplot 前设定
 import matplotlib.font_manager
@@ -71,7 +72,7 @@ except Exception:
 # ==============================================================================
 TRADING_DAYS = 252
 
-st.set_page_config(page_title="全球市场量化研报 v2", layout="wide",
+st.set_page_config(page_title=t("全球量化投研"), layout="wide",
                    initial_sidebar_state="expanded")
 
 
@@ -103,7 +104,6 @@ def init_state():
         "opt_results": None,         # 参数寻优结果
         "wfa_results": None,         # walk-forward 结果
         "portfolio_result": None,    # 组合回测结果
-        "llm_report": None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -698,7 +698,7 @@ def rolling_metrics(d: pd.DataFrame, window: int = 126) -> pd.DataFrame:
 
 
 # ==============================================================================
-# 7. 统计检验层  —— 这一层回答的是："这个结果是真本事，还是撞大运？"
+# 7. 统计检验层  —— 这一层回答的是："策略表现能否与随机结果区分？"
 # ==============================================================================
 def probabilistic_sharpe_ratio(sr: float, n: int, skew: float, kurt: float,
                                sr_benchmark: float = 0.0) -> float:
@@ -1282,7 +1282,7 @@ def local_report(ev: dict) -> str:
     """
     没有 API Key 时的本地规则模板。宁可用确定性的规则写，也不留空白。
     """
-    s, t, k = ev["绩效指标"], ev["交易统计"], ev["统计检验"]
+    s, trades, k = ev["绩效指标"], ev["交易统计"], ev["统计检验"]
 
     def g(d, key, default=np.nan):
         v = d.get(key, default)
@@ -1294,25 +1294,25 @@ def local_report(ev: dict) -> str:
 
     verdicts = []
     if psr is not None:
-        verdicts.append("PSR {:.0%}，{}".format(
-            psr, "夏普显著为正的把握较高" if psr > 0.95 else
-                 "尚不足以排除运气成分" if psr > 0.75 else "统计上很可能是噪声"))
+        verdicts.append(t("PSR {:.0%}，{}").format(
+            psr, t("夏普显著为正的把握较高") if psr > 0.95 else
+                 t("尚不足以排除运气成分") if psr > 0.75 else t("统计上很可能是噪声")))
     if p_rc is not None:
-        verdicts.append("Reality Check p = {:.3f}，{}".format(
-            p_rc, "超额收益难以用随机性解释" if p_rc < 0.05 else "超额收益无法与随机区分"))
+        verdicts.append(t("Reality Check p = {:.3f}，{}").format(
+            p_rc, t("超额收益难以用随机性解释") if p_rc < 0.05 else t("超额收益无法与随机区分")))
     if wfe is not None:
-        verdicts.append("Walk-Forward 效率 {:.2f}，{}".format(
-            wfe, "样本外基本延续了样本内表现" if wfe > 0.6 else "样本外明显衰减，过拟合嫌疑大"))
+        verdicts.append(t("Walk-Forward 效率 {:.2f}，{}").format(
+            wfe, t("样本外基本延续了样本内表现") if wfe > 0.6 else t("样本外明显衰减，过拟合嫌疑大")))
 
     lines = [
-        "## 一、结论", "",
-        "标的 **{}**，策略 **{}**。".format(ev["标的"], ev["策略配置"].get("strategy", "-")),
-        "回测区间年化 {}、最大回撤 {}、夏普 {}。".format(
+        t("## 一、结论"), "",
+        t("标的 **{}**，策略 **{}**。").format(ev["标的"], t(ev["策略配置"].get("strategy", "-"))),
+        t("回测区间年化 {}、最大回撤 {}、夏普 {}。").format(
             f"{cagr:.2%}" if cagr is not None else "-",
             f"{mdd:.2%}" if mdd is not None else "-",
             f"{sharpe:.2f}" if sharpe is not None else "-"),
-        ("相对买入持有的超额收益为 {:.2%}。".format(excess) if excess is not None else ""),
-        "", "## 二、收益与风险", "",
+        (t("相对买入持有的超额收益为 {:.2%}。").format(excess) if excess is not None else ""),
+        "", t("## 二、收益与风险"), "",
     ]
     for key in ["年化收益", "年化波动", "夏普比率", "索提诺比率", "卡玛比率",
                 "最大回撤", "最长回撤天数", "在场比例", "年换手率"]:
@@ -1321,28 +1321,28 @@ def local_report(ev: dict) -> str:
             if key in ("年化收益", "年化波动", "最大回撤", "在场比例"):
                 fmt = f"{v:.2%}"
             elif key == "最长回撤天数":
-                fmt = f"{int(v)} 天"
+                fmt = t("{} 天").format(int(v))
             else:
                 fmt = f"{v:.2f}"
-            lines.append(f"- {key}：{fmt}")
-    if t:
-        lines += ["", "交易层面：共 {} 笔，胜率 {:.1%}，盈亏比 {}，最大连亏 {} 次，平均持有 {:.0f} 天。".format(
-            t.get("交易笔数", 0), t.get("胜率", 0) or 0,
-            f"{t.get('盈亏比'):.2f}" if isinstance(t.get("盈亏比"), (int, float)) and t.get("盈亏比") == t.get("盈亏比") else "-",
-            t.get("最大连亏次数", 0), t.get("平均持有天数", 0) or 0)]
-    lines += ["", "## 三、这个结果可信吗", ""]
-    lines += [f"- {v}" for v in verdicts] or ["- 未运行统计检验，无法判断。"]
+            lines.append(f"- {t(key)} · {fmt}")
+    if trades:
+        lines += ["", t("交易层面：共 {} 笔，胜率 {:.1%}，盈亏比 {}，最大连亏 {} 次，平均持有 {:.0f} 天。").format(
+            trades.get("交易笔数", 0), trades.get("胜率", 0) or 0,
+            f"{trades.get('盈亏比'):.2f}" if isinstance(trades.get("盈亏比"), (int, float)) and trades.get("盈亏比") == trades.get("盈亏比") else "-",
+            trades.get("最大连亏次数", 0), trades.get("平均持有天数", 0) or 0)]
+    lines += ["", t("## 三、这个结果可信吗"), ""]
+    lines += [f"- {v}" for v in verdicts] or [t("- 未运行统计检验，无法判断。")]
     lines += [
-        "", "## 四、主要风险与失效场景", "",
-        "- 趋势类策略在震荡市中会被反复止损，最大连亏次数是实盘最难扛的部分。",
-        "- 交易成本假设（佣金 {} bp、印花税 {} bp）若与实际券商费率不符，净值会明显偏移。".format(
+        "", t("## 四、主要风险与失效场景"), "",
+        t("- 趋势类策略在震荡市中会被反复止损，最大连亏次数是实盘最难扛的部分。"),
+        t("- 交易成本假设（佣金 {} bp、印花税 {} bp）若与实际券商费率不符，净值会明显偏移。").format(
             ev["策略配置"].get("commission_bps"), ev["策略配置"].get("stamp_duty_bps")),
-        "- 单标的回测不含选股环节，换一只标的结论未必成立。",
-        "", "## 五、下一步改进建议", "",
-        "- 用 Walk-Forward 而不是全样本寻优来确定参数。",
-        "- 扩大到多标的组合，用风险平价分散单一标的的尾部风险。",
-        "- 引入更真实的滑点模型（按成交量或买卖价差），并做成本敏感性分析。",
-        "", "---", "*本节由本地规则模板生成（未配置大模型 API Key）。*",
+        t("- 单标的回测不含选股环节，换一只标的结论未必成立。"),
+        "", t("## 五、下一步改进建议"), "",
+        t("- 用 Walk-Forward 而不是全样本寻优来确定参数。"),
+        t("- 扩大到多标的组合，用风险平价分散单一标的的尾部风险。"),
+        t("- 引入更真实的滑点模型（按成交量或买卖价差），并做成本敏感性分析。"),
+        "", "---", t("*本报告由本地规则模板生成。*"),
     ]
     return "\n".join([x for x in lines if x is not None])
 
@@ -1358,7 +1358,8 @@ def llm_report(ev: dict, api_key: str, base_url: str, model: str, timeout: int =
     payload = {
         "model": model,
         "messages": [
-            {"role": "system", "content": LLM_SYSTEM_PROMPT},
+            {"role": "system", "content": LLM_SYSTEM_PROMPT + ("\nWrite all headings and prose in English."
+                                                       if st.session_state.get("ui_language") == "English" else "")},
             {"role": "user", "content": "以下是回测证据包（JSON）：\n\n"
                                         + json.dumps(ev, ensure_ascii=False, indent=2)},
         ],
@@ -1371,9 +1372,9 @@ def llm_report(ev: dict, api_key: str, base_url: str, model: str, timeout: int =
                              json=payload, timeout=timeout)
         resp.raise_for_status()
         text = resp.json()["choices"][0]["message"]["content"]
-        return text + "\n\n---\n*由 {} 生成，数值全部来自本地回测证据包。*".format(model)
+        return text + "\n\n---\n" + t("*由 {} 生成，数值全部来自本地回测证据包。*").format(model)
     except Exception as e:
-        return local_report(ev) + f"\n\n> ⚠️ 大模型调用失败（{type(e).__name__}），已回退本地模板。"
+        return local_report(ev) + "\n\n> ⚠️ " + t("大模型调用失败（{}），已回退本地模板。").format(type(e).__name__)
 
 
 # ==============================================================================
@@ -1434,94 +1435,116 @@ def fmt_num(x, digits=2):
 # ==============================================================================
 # 12. 侧边栏：全局参数
 # ==============================================================================
-st.title("🌍 全球市场量化回测与绩效研报系统")
-st.caption("v2.0 · 信号融合 / 真实成本 / 统计显著性检验 / Walk-Forward 样本外 / 组合风险预算 / AI 研报")
+def keep_selected_options():
+    # Select boxes serialize their displayed text. Send the canonical values back
+    # to the browser when the next render changes the option language.
+    for key in ("data_source", "strategy", "blend_members", "t1_m", "t4_m", "t5_m",
+                "weight_method", "rebalance", "metric_pick"):
+        if key in st.session_state:
+            st.session_state[key] = st.session_state[key]
+
+
+st.sidebar.radio("语言 / Language", ["中文", "English"], key="ui_language",
+                 horizontal=True, on_change=keep_selected_options)
+option_label = english_label if st.session_state["ui_language"] == "English" else str
+st.sidebar.caption(t("右上角 **⋮ → 主题** 可选浅色、深色或跟随系统（Light / Dark / System）。"))
+st.title(t("全球量化投研"))
+st.caption(t("比较策略与买入持有的表现，查看交易成本、回撤和逐笔记录。"))
+
+with st.expander(t("第一次使用？从这里开始"), expanded=not st.session_state["history_reports"]):
+    st.markdown("\n\n".join(t(step) for step in (
+        "1. 在左侧选择日期和策略。初次体验可以保留默认参数。",
+        "2. 在「单标的回测」选择市场、填入代码（如沪深 A 股 `600519` 或美股 `AAPL`），点击「运行回测」。",
+        "3. 查看净值和回撤，再到「交易台账」核对每笔交易。需要导出时，打开「研报导出」并生成报告。",
+    )))
 
 with st.sidebar:
-    st.header("① 样本与数据源")
+    st.header(t("样本与数据源"))
     c_a, c_b = st.columns(2)
-    start_date = c_a.date_input("开始日期", pd.to_datetime("2019-01-01"))
-    end_date = c_b.date_input("结束日期", pd.to_datetime("today"))
-    data_source = st.selectbox("数据源", ["自动", "yfinance", "akshare"],
-                               help="A 股优先走 akshare 取前复权；失败自动退回 yfinance")
+    start_date = c_a.date_input(t("开始日期"), pd.to_datetime("2019-01-01"), key="start_date")
+    end_date = c_b.date_input(t("结束日期"), pd.to_datetime("today"), key="end_date")
+    data_source = st.selectbox(t("数据源"), ["自动", "yfinance", "akshare"],
+                               help=t("A 股优先走 akshare 取前复权；失败自动退回 yfinance"), format_func=option_label, key="data_source")
 
-    st.header("② 策略与信号")
-    strategy = st.selectbox("策略类型",
-                            list(SIGNAL_LIB.keys()) + ["信号融合"])
+    st.header(t("策略与信号"))
+    strategy = st.selectbox(t("策略类型"),
+                            list(SIGNAL_LIB.keys()) + ["信号融合"], format_func=option_label, key="strategy")
     blend_members, blend_mode = (), "多数投票"
     if strategy == "信号融合":
-        blend_members = tuple(st.multiselect("参与融合的子策略", list(SIGNAL_LIB.keys()),
-                                             default=list(SIGNAL_LIB.keys())[:3]))
-        blend_mode = st.radio("融合规则", ["多数投票", "全票通过", "任一触发"], horizontal=True)
+        blend_members = tuple(st.multiselect(t("参与融合的子策略"), list(SIGNAL_LIB.keys()),
+                                             default=list(SIGNAL_LIB.keys())[:3], format_func=option_label, key="blend_members"))
+        blend_mode = st.radio(t("融合规则"), ["多数投票", "全票通过", "任一触发"], horizontal=True, format_func=option_label, key="blend_mode")
 
-    with st.expander("信号参数", expanded=(strategy in ("趋势跟踪 (MA+MACD)", "信号融合"))):
+    with st.expander(t("信号参数"), expanded=(strategy in ("趋势跟踪 (MA+MACD)", "信号融合"))):
         c1, c2 = st.columns(2)
-        fast_ma = c1.number_input("快速均线", 1, 100, 5)
-        slow_ma = c2.number_input("慢速均线", 2, 250, 20)
+        fast_ma = c1.number_input(t("快速均线"), 1, 100, 5, key="fast_ma")
+        slow_ma = c2.number_input(t("慢速均线"), 2, 250, 20, key="slow_ma")
         c1, c2, c3 = st.columns(3)
-        macd_short = c1.number_input("MACD 短", 2, 50, 12)
-        macd_long = c2.number_input("MACD 长", 3, 100, 26)
-        macd_signal = c3.number_input("MACD 信号", 2, 50, 9)
+        macd_short = c1.number_input(t("MACD 短"), 2, 50, 12, key="macd_short")
+        macd_long = c2.number_input(t("MACD 长"), 3, 100, 26, key="macd_long")
+        macd_signal = c3.number_input(t("MACD 信号"), 2, 50, 9, key="macd_signal")
         c1, c2 = st.columns(2)
-        boll_period = c1.number_input("布林周期", 5, 120, 20)
-        boll_std = c2.number_input("布林倍数", 0.5, 4.0, 2.0, 0.1)
+        boll_period = c1.number_input(t("布林周期"), 5, 120, 20, key="boll_period")
+        boll_std = c2.number_input(t("布林倍数"), 0.5, 4.0, 2.0, 0.1, key="boll_std")
         c1, c2, c3 = st.columns(3)
-        rsi_period = c1.number_input("RSI 周期", 2, 60, 14)
-        rsi_buy = c2.number_input("RSI 超卖", 5, 50, 30)
-        rsi_sell = c3.number_input("RSI 超买", 50, 95, 70)
+        rsi_period = c1.number_input(t("RSI 周期"), 2, 60, 14, key="rsi_period")
+        rsi_buy = c2.number_input(t("RSI 超卖"), 5, 50, 30, key="rsi_buy")
+        rsi_sell = c3.number_input(t("RSI 超买"), 50, 95, 70, key="rsi_sell")
         c1, c2, c3 = st.columns(3)
-        mom_lookback = c1.number_input("动量回看", 5, 250, 60)
-        adx_period = c2.number_input("ADX 周期", 5, 60, 14)
-        adx_min = c3.number_input("ADX 门槛", 0.0, 60.0, 20.0, 1.0)
+        mom_lookback = c1.number_input(t("动量回看"), 5, 250, 60, key="mom_lookback")
+        adx_period = c2.number_input(t("ADX 周期"), 5, 60, 14, key="adx_period")
+        adx_min = c3.number_input(t("ADX 门槛"), 0.0, 60.0, 20.0, 1.0, key="adx_min")
 
-    st.header("③ 风控与仓位")
+    st.header(t("风控与仓位"))
     c1, c2 = st.columns(2)
-    atr_period = c1.number_input("ATR 周期", 2, 60, 14)
-    atr_multi = c2.number_input("ATR 止损倍数", 0.5, 10.0, 2.0, 0.1)
-    init_pos = st.slider("首次建仓比例", 0.1, 1.0, 0.5, 0.1)
-    add_on_atr = st.number_input("加仓触发（N 倍 ATR 浮盈）", 0.0, 5.0, 1.0, 0.1)
-    time_stop = st.number_input("时间止损（交易日，0=关闭）", 0, 250, 0)
-    vol_target = st.number_input("波动率目标仓位（年化，0=关闭）", 0.0, 1.0, 0.0, 0.05,
-                                 help="开启后：目标波动 ÷ 近期已实现波动 = 仓位缩放系数")
-    max_leverage = st.number_input("最大仓位上限", 0.1, 2.0, 1.0, 0.1)
+    atr_period = c1.number_input(t("ATR 周期"), 2, 60, 14, key="atr_period")
+    atr_multi = c2.number_input(t("ATR 止损倍数"), 0.5, 10.0, 2.0, 0.1, key="atr_multi")
+    init_pos = st.slider(t("首次建仓比例"), 0.1, 1.0, 0.5, 0.1, key="init_pos")
+    add_on_atr = st.number_input(t("加仓触发（N 倍 ATR 浮盈）"), 0.0, 5.0, 1.0, 0.1, key="add_on_atr")
+    time_stop = st.number_input(t("时间止损（交易日，0=关闭）"), 0, 250, 0, key="time_stop")
+    vol_target = st.number_input(t("波动率目标仓位（年化，0=关闭）"), 0.0, 1.0, 0.0, 0.05,
+                                 help=t("开启后：目标波动 ÷ 近期已实现波动 = 仓位缩放系数"), key="vol_target")
+    max_leverage = st.number_input(t("最大仓位上限"), 0.1, 2.0, 1.0, 0.1, key="max_leverage")
 
-    st.header("④ 交易成本")
-    is_a_share = st.checkbox("按 A 股规则计税（卖出收印花税）", value=True)
+    st.header(t("交易成本"))
+    is_a_share = st.checkbox(t("按 A 股规则计税（卖出收印花税）"), value=True, key="is_a_share")
     c1, c2 = st.columns(2)
-    commission_bps = c1.number_input("单边佣金 (bp)", 0.0, 50.0, 1.0, 0.1)
-    stamp_duty_bps = c2.number_input("印花税 (bp)", 0.0, 50.0, 5.0, 0.5)
-    slippage_mode = st.radio("滑点模型", ["ATR 比例", "固定 bp"], horizontal=True)
+    commission_bps = c1.number_input(t("单边佣金 (bp)"), 0.0, 50.0, 1.0, 0.1, key="commission_bps")
+    stamp_duty_bps = c2.number_input(t("印花税 (bp)"), 0.0, 50.0, 5.0, 0.5, key="stamp_duty_bps")
+    slippage_mode = st.radio(t("滑点模型"), ["ATR 比例", "固定 bp"], horizontal=True, format_func=option_label, key="slippage_mode")
     if slippage_mode == "ATR 比例":
-        slippage_atr = st.number_input("滑点 = N × ATR", 0.0, 1.0, 0.05, 0.01)
+        slippage_atr = st.number_input(t("滑点 = N × ATR"), 0.0, 1.0, 0.05, 0.01, key="slippage_atr")
         slippage_bps = 2.0
     else:
-        slippage_bps = st.number_input("固定滑点 (bp)", 0.0, 100.0, 2.0, 0.5)
+        slippage_bps = st.number_input(t("固定滑点 (bp)"), 0.0, 100.0, 2.0, 0.5, key="slippage_bps")
         slippage_atr = 0.05
-    rf_annual = st.number_input("无风险利率（年化）", 0.0, 0.10, 0.0, 0.005)
+    rf_annual = st.number_input(t("无风险利率（年化）"), 0.0, 0.10, 0.0, 0.005, key="rf_annual")
 
     st.markdown("---")
-    st.header("🗂️ 研报档案库")
+    st.header(t("🗂️ 研报档案库"))
     if st.session_state["history_reports"]:
         keys = list(st.session_state["history_reports"].keys())
         cur = st.session_state["current_report_key"]
-        idx = keys.index(cur) if cur in keys else 0
-        sel = st.selectbox("查看历史研报", keys, index=idx)
-        if sel != st.session_state["current_report_key"]:
-            st.session_state["current_report_key"] = sel
-            st.rerun()
-        if st.button("🗑️ 清空档案库"):
+        st.session_state["archive_choice"] = cur if cur in keys else keys[-1]
+
+        def select_report():
+            st.session_state["current_report_key"] = st.session_state["archive_choice"]
+
+        st.selectbox(t("查看历史研报"), keys, key="archive_choice",
+                     format_func=lambda name: display_report_name(name, option_label), on_change=select_report)
+        if st.button(t("🗑️ 清空档案库"), help=t("清除本次会话中所有已保存的单标的回测和对应研报。")):
             st.session_state["history_reports"] = {}
             st.session_state["current_report_key"] = None
             st.rerun()
     else:
-        st.info("暂无缓存，先到右侧生成一份研报。")
+        st.info(t("首次运行单标的回测后，可在这里切换历史结果。"))
 
     st.markdown("---")
-    with st.expander("🤖 AI 研报设置"):
+    with st.expander(t("🤖 AI 研报设置")):
         llm_key = st.text_input("API Key", type="password",
-                                help="留空则用本地规则模板生成研报，功能不受影响")
-        llm_base = st.text_input("Base URL", "https://api.deepseek.com/v1")
-        llm_model = st.text_input("模型", "deepseek-chat")
+                                help=t("留空则用本地规则模板生成研报，功能不受影响"), key="llm_key")
+        llm_base = st.text_input("Base URL", "https://api.deepseek.com/v1", key="llm_base")
+        llm_model = st.text_input(t("模型"), "deepseek-chat", key="llm_model")
 
 CFG = BTConfig(
     strategy=strategy, fast_ma=int(fast_ma), slow_ma=int(slow_ma),
@@ -1542,8 +1565,8 @@ CFG = BTConfig(
 
 def symbol_input(key: str, default_a="600519", default_us="AAPL"):
     c1, c2 = st.columns([1, 2])
-    mkt = c1.selectbox("市场", ["A股 (沪深)", "美股 (NASDAQ/NYSE)"], key=f"{key}_m")
-    raw = c2.text_input("代码", default_a if mkt.startswith("A股") else default_us, key=f"{key}_s")
+    mkt = c1.selectbox(t("市场"), ["A股 (沪深)", "美股 (NASDAQ/NYSE)"], key=f"{key}_m", format_func=option_label)
+    raw = c2.text_input(t("代码"), default_a if mkt.startswith("A股") else default_us, key=f"{key}_s_{mkt[:2]}")
     return normalize_symbol(raw, mkt)
 
 
@@ -1557,24 +1580,24 @@ def current_report():
 # ==============================================================================
 # 13. 页面
 # ==============================================================================
-TABS = st.tabs([
-    "📑 单标的研报", "🧾 交易台账与归因", "🔬 稳健性与显著性",
-    "🤖 参数寻优与高原", "🧪 Walk-Forward", "🌍 组合与风险预算", "📝 AI 研报导出",
-])
+TABS = st.tabs([t(name) for name in (
+    "单标的回测", "交易台账", "稳健性检验", "参数寻优", "滚动验证", "多资产组合", "研报导出",
+)])
 
 # ------------------------------------------------------------------ Tab 1
 with TABS[0]:
-    st.subheader("生成策略研报")
+    st.subheader(t("单标的策略回测"))
+    st.caption(t("按当前日期、策略和成本计算单个标的的表现，结果会加入本次会话的档案库。"))
     sym1 = symbol_input("t1")
-    if st.button("▶️ 运行回测", type="primary"):
-        with st.spinner("取数并回测中…"):
+    if st.button(t("▶️ 运行回测"), type="primary", help=t("按当前日期、策略和成本计算单个标的的表现，结果会加入本次会话的档案库。")):
+        with st.spinner(t("取数并回测中…")):
             raw = fetch_ohlcv(sym1, start_date, end_date, data_source)
             if raw.empty:
-                st.error("没有取到数据，检查代码拼写或换一个数据源。")
+                st.error(t("没有取到数据，检查代码拼写或换一个数据源。"))
             else:
                 res = run_backtest(raw, CFG)
                 if res.empty:
-                    st.error("样本太短，无法回测。")
+                    st.error(t("样本太短，无法回测。"))
                 else:
                     stats = performance_stats(res, CFG)
                     ledger = trade_ledger(res)
@@ -1585,107 +1608,107 @@ with TABS[0]:
                         "tstats": trade_stats(ledger), "quality": data_quality_report(raw),
                     }
                     st.session_state["current_report_key"] = name
-                    st.session_state["llm_report"] = None
+                    st.rerun()
 
     rep = current_report()
     if rep is None:
-        st.info("先点上面的「运行回测」。左侧栏可以调策略、风控和成本假设。")
+        st.info(t("先点上面的「运行回测」。左侧栏可以调策略、风控和成本假设。"))
     else:
         res, stats, cfg = rep["result"], rep["stats"], rep["cfg"]
-        st.success(f"当前研报：**{st.session_state['current_report_key']}**")
+        st.success(t("当前研报：**{}**").format(display_report_name(st.session_state["current_report_key"], option_label)))
 
-        with st.expander("🩺 数据质量体检（回测前先看这里）"):
+        with st.expander(t("🩺 数据质量体检（回测前先看这里）")):
             q = rep["quality"]
             cols = st.columns(len(q))
             for (k, v), col in zip(q.items(), cols):
-                col.metric(k, v)
+                col.metric(t(k), t(v))
             if q.get("疑似停牌(零成交)", 0) > 0 or q.get("异常跳空(>11%)", 0) > 0:
-                st.warning("样本里存在停牌日或异常跳空，回测结果可能被这几天放大，建议核对原始数据。")
+                st.warning(t("样本里存在停牌日或异常跳空，回测结果可能被这几天放大，建议核对原始数据。"))
 
-        st.markdown("### 核心绩效")
+        st.markdown(t("### 核心绩效"))
         m = st.columns(6)
-        m[0].metric("累计收益", fmt_pct(stats["累计收益"]), f"基准 {fmt_pct(stats['基准累计收益'])}")
-        m[1].metric("年化收益", fmt_pct(stats["年化收益"]))
-        m[2].metric("年化波动", fmt_pct(stats["年化波动"]))
-        m[3].metric("最大回撤", fmt_pct(stats["最大回撤"]), "风控", delta_color="inverse")
-        m[4].metric("夏普", fmt_num(stats["夏普比率"]))
-        m[5].metric("卡玛", fmt_num(stats["卡玛比率"]))
+        m[0].metric(t("累计收益"), fmt_pct(stats["累计收益"]), t("基准 {}").format(fmt_pct(stats["基准累计收益"])))
+        m[1].metric(t("年化收益"), fmt_pct(stats["年化收益"]))
+        m[2].metric(t("年化波动"), fmt_pct(stats["年化波动"]))
+        m[3].metric(t("最大回撤"), fmt_pct(stats["最大回撤"]), t("风控"), delta_color="inverse")
+        m[4].metric(t("夏普"), fmt_num(stats["夏普比率"]))
+        m[5].metric(t("卡玛"), fmt_num(stats["卡玛比率"]))
 
         m = st.columns(6)
-        m[0].metric("索提诺", fmt_num(stats["索提诺比率"]))
+        m[0].metric(t("索提诺"), fmt_num(stats["索提诺比率"]))
         m[1].metric("Omega", fmt_num(stats["Omega"]))
-        m[2].metric("信息比率", fmt_num(stats["信息比率"]))
-        m[3].metric("年化 Alpha", fmt_pct(stats["年化Alpha"]))
+        m[2].metric(t("信息比率"), fmt_num(stats["信息比率"]))
+        m[3].metric(t("年化 Alpha"), fmt_pct(stats["年化Alpha"]))
         m[4].metric("Beta", fmt_num(stats["Beta"]))
-        m[5].metric("最长回撤", f"{stats['最长回撤天数']} 天")
+        m[5].metric(t("最长回撤"), t("{} 天").format(stats["最长回撤天数"]))
 
         m = st.columns(6)
-        m[0].metric("日 VaR95", fmt_pct(stats["日VaR95"]))
-        m[1].metric("日 CVaR95", fmt_pct(stats["日CVaR95"]))
-        m[2].metric("偏度", fmt_num(stats["偏度"]))
-        m[3].metric("峰度", fmt_num(stats["峰度"]))
-        m[4].metric("在场比例", fmt_pct(stats["在场比例"]))
-        m[5].metric("年换手", fmt_num(stats["年换手率"]))
+        m[0].metric(t("日 VaR95"), fmt_pct(stats["日VaR95"]))
+        m[1].metric(t("日 CVaR95"), fmt_pct(stats["日CVaR95"]))
+        m[2].metric(t("偏度"), fmt_num(stats["偏度"]))
+        m[3].metric(t("峰度"), fmt_num(stats["峰度"]))
+        m[4].metric(t("在场比例"), fmt_pct(stats["在场比例"]))
+        m[5].metric(t("年换手"), fmt_num(stats["年换手率"]))
 
-        st.caption(f"⚠️ 累计交易成本吃掉了 {fmt_pct(stats['累计成本占比'])} 的本金"
-                   f"（佣金 {cfg.commission_bps}bp + {cfg.slippage_mode} 滑点"
-                   f"{' + 印花税 ' + str(cfg.stamp_duty_bps) + 'bp' if cfg.is_a_share else ''}）。"
-                   "成本假设是回测里最容易自欺欺人的地方，改一改这里再看结论稳不稳。")
+        st.caption(t("累计成本占本金的 {}。单边佣金 {} bp，滑点模型为{}，卖出印花税 {} bp。").format(
+            fmt_pct(stats["累计成本占比"]), cfg.commission_bps, t(cfg.slippage_mode),
+            cfg.stamp_duty_bps if cfg.is_a_share else 0))
 
         c1, c2 = st.columns([3, 2])
         with c1:
-            st.markdown("#### 净值走势（已扣成本）")
-            st.line_chart(res[["基准净值", "策略净值"]])
-            st.markdown("#### 回撤")
-            st.area_chart(res[["Drawdown", "基准Drawdown"]] * 100)
-            st.markdown("#### 仓位变化（0 = 空仓）")
+            st.markdown(t("#### 净值走势（已扣成本）"))
+            st.line_chart(display_frame(res[["基准净值", "策略净值"]]))
+            st.markdown(t("#### 回撤"))
+            st.area_chart(display_frame(res[["Drawdown", "基准Drawdown"]] * 100))
+            st.markdown(t("#### 仓位变化（0 = 空仓）"))
             st.line_chart(res[["Position"]])
         with c2:
-            st.markdown("#### 月度收益")
+            st.markdown(t("#### 月度收益"))
             mt = monthly_return_table(res)
-            st.dataframe(mt.style.format("{:.2%}", na_rep="-")
+            st.dataframe(display_frame(mt).style.format("{:.2%}", na_rep="-")
                          .background_gradient(cmap="RdYlGn", axis=None, vmin=-0.12, vmax=0.12),
-                         use_container_width=True, height=380)
-            st.markdown("#### 滚动指标（126 日）")
+                         width="stretch", height=380)
+            st.markdown(t("#### 滚动指标（126 日）"))
             rm = rolling_metrics(res, 126)
             if not rm.empty:
-                st.line_chart(rm[["滚动夏普"]])
+                st.line_chart(display_frame(rm[["滚动夏普"]]))
 
 # ------------------------------------------------------------------ Tab 2
 with TABS[1]:
-    st.subheader("逐笔交易台账")
+    st.subheader(t("逐笔交易台账"))
+    st.caption(t("逐笔核对买入、卖出、收益和离场原因。可将完整记录下载为 CSV。"))
     rep = current_report()
     if rep is None:
-        st.info("先在「单标的研报」里跑一次回测。")
+        st.info(t("请先到「单标的回测」点击「运行回测」。"))
     else:
         ledger, tstats = rep["ledger"], rep["tstats"]
         if ledger.empty:
-            st.warning("回测区间内没有产生任何完整交易 —— 信号太严或样本太短。")
+            st.warning(t("回测区间内没有产生任何完整交易 —— 信号太严或样本太短。"))
         else:
             m = st.columns(6)
-            m[0].metric("交易笔数", tstats["交易笔数"])
-            m[1].metric("胜率", fmt_pct(tstats["胜率"], 1))
-            m[2].metric("盈亏比", fmt_num(tstats["盈亏比"]))
-            m[3].metric("单笔期望", fmt_pct(tstats["单笔期望"]))
-            m[4].metric("最大连亏", f"{tstats['最大连亏次数']} 次", "心理抗压阈值", delta_color="inverse")
-            m[5].metric("平均持有", f"{tstats['平均持有天数']:.0f} 天")
+            m[0].metric(t("交易笔数"), tstats["交易笔数"])
+            m[1].metric(t("胜率"), fmt_pct(tstats["胜率"], 1))
+            m[2].metric(t("盈亏比"), fmt_num(tstats["盈亏比"]))
+            m[3].metric(t("单笔期望"), fmt_pct(tstats["单笔期望"]))
+            m[4].metric(t("最大连亏"), t("{} 次").format(tstats["最大连亏次数"]), t("心理抗压阈值"), delta_color="inverse")
+            m[5].metric(t("平均持有"), t("{:.0f} 天").format(tstats["平均持有天数"]))
 
-            st.markdown("#### 离场原因归因")
+            st.markdown(t("#### 离场原因归因"))
             grp = ledger.groupby("离场原因").agg(
                 笔数=("区间收益", "size"),
                 平均收益=("区间收益", "mean"),
                 合计贡献=("区间收益", "sum"),
                 平均持有天数=("持有天数", "mean"),
             ).sort_values("笔数", ascending=False)
-            st.dataframe(grp.style.format({"平均收益": "{:.2%}", "合计贡献": "{:.2%}",
-                                           "平均持有天数": "{:.0f}"}),
-                         use_container_width=True)
-            st.caption("如果「初始止损」占了大多数笔数且合计贡献显著为负，说明入场信号太钝或止损设得太紧，"
-                       "应该先改信号而不是继续调止损倍数。")
+            st.dataframe(display_frame(grp).style.format(display_formats({"平均收益": "{:.2%}", "合计贡献": "{:.2%}",
+                                           "平均持有天数": "{:.0f}"})),
+                         width="stretch")
+            st.caption(t("如果「初始止损」占了大多数笔数且合计贡献显著为负，说明入场信号太钝或止损设得太紧，"
+                       "应该先改信号而不是继续调止损倍数。"))
 
             c1, c2 = st.columns(2)
             with c1:
-                st.markdown("#### 单笔收益分布")
+                st.markdown(t("#### 单笔收益分布"))
                 fig, ax = plt.subplots(figsize=(6, 3.4))
                 ax.hist(ledger["区间收益"] * 100, bins=30, color="#4C78A8", alpha=0.85)
                 ax.axvline(0, color="#333", linewidth=1)
@@ -1694,7 +1717,7 @@ with TABS[1]:
                 fig.tight_layout()
                 st.pyplot(fig)
             with c2:
-                st.markdown("#### 收益 vs 持有天数")
+                st.markdown(t("#### 收益 vs 持有天数"))
                 fig, ax = plt.subplots(figsize=(6, 3.4))
                 colors = np.where(ledger["区间收益"] > 0, "#59A14F", "#E45756")
                 ax.scatter(ledger["持有天数"], ledger["区间收益"] * 100, c=colors, alpha=0.75)
@@ -1705,38 +1728,38 @@ with TABS[1]:
                 fig.tight_layout()
                 st.pyplot(fig)
 
-            st.markdown("#### 明细")
-            st.dataframe(ledger.style.format({"区间收益": "{:.2%}", "区间成本": "{:.4%}"}),
-                         use_container_width=True, height=360)
-            st.download_button("⬇️ 下载交易台账 CSV",
-                               ledger.to_csv(index=False).encode("utf-8-sig"),
-                               file_name="trade_ledger.csv", mime="text/csv")
+            st.markdown(t("#### 明细"))
+            st.dataframe(display_frame(ledger).style.format(display_formats({"区间收益": "{:.2%}", "区间成本": "{:.4%}"})),
+                         width="stretch", height=360)
+            st.download_button(t("⬇️ 下载交易台账 CSV"),
+                               display_frame(ledger).to_csv(index=False).encode("utf-8-sig"),
+                               file_name="trade_ledger.csv", mime="text/csv", help=t("下载当前回测的逐笔交易记录，可用 Excel 打开。"))
 
 # ------------------------------------------------------------------ Tab 3
 with TABS[2]:
-    st.subheader("这个结果是真本事，还是撞大运？")
-    st.caption("回测最大的谎言不是算错，而是算对了但没意义。这一页用统计检验回答：观测到的表现能否与随机区分。")
+    st.subheader(t("策略表现能否与随机结果区分？"))
+    st.caption(t("对当前回测的收益进行重抽样，查看置信区间，并评估多次试验对显著性的影响。"))
     rep = current_report()
     if rep is None:
-        st.info("先在「单标的研报」里跑一次回测。")
+        st.info("请先到「单标的回测」点击「运行回测」。")
     else:
         res, stats = rep["result"], rep["stats"]
         c1, c2, c3 = st.columns(3)
-        n_boot = c1.number_input("Bootstrap 次数", 100, 3000, 500, 100)
-        block = c2.number_input("区块长度（交易日）", 5, 120, 20, 5,
-                                help="区块自助法保留块内的自相关与波动聚集，比逐日重抽更贴近真实")
-        n_sim = c3.number_input("蒙特卡洛模拟次数", 200, 10000, 2000, 200)
-        mc_mode = st.radio("蒙特卡洛模式", ["有放回重抽", "随机排列"], horizontal=True,
-                           help="随机排列只打乱顺序，终值恒定（乘法可交换），只能看回撤分布；"
-                                "有放回重抽把历史交易当分布重新抽样，终值与亏损概率才有意义")
-        n_trials = st.number_input("此前一共试过多少组参数（用于 DSR 多重检验校正）",
+        n_boot = c1.number_input(t("Bootstrap 次数"), 100, 3000, 500, 100, key="n_boot")
+        block = c2.number_input(t("区块长度（交易日）"), 5, 120, 20, 5,
+                                help=t("区块自助法保留块内的自相关与波动聚集，比逐日重抽更贴近真实"), key="block")
+        n_sim = c3.number_input(t("蒙特卡洛模拟次数"), 200, 10000, 2000, 200, key="n_sim")
+        mc_mode = st.radio(t("蒙特卡洛模式"), ["有放回重抽", "随机排列"], horizontal=True,
+                           help=t("随机排列只打乱顺序，终值恒定（乘法可交换），只能看回撤分布；"
+                                "有放回重抽把历史交易当分布重新抽样，终值与亏损概率才有意义"), format_func=option_label, key="mc_mode")
+        n_trials = st.number_input(t("此前一共试过多少组参数（用于 DSR 多重检验校正）"),
                                    1, 100000, 1, 1,
-                                   help="跑完「参数寻优」后回来填网格组合数，DSR 才有意义")
+                                   help=t("跑完「参数寻优」后回来填网格组合数，DSR 才有意义"), key="n_trials")
 
-        if st.button("🔬 运行全部检验", type="primary"):
+        if st.button(t("🔬 运行全部检验"), type="primary", help=t("对当前回测进行重抽样和显著性检验；试过多组参数时，可填写试验次数。")):
             r = res["策略每日收益"].dropna().values
             b = res["每日收益率"].reindex(res["策略每日收益"].dropna().index).fillna(0).values
-            with st.spinner("Bootstrap / 蒙特卡洛 / Reality Check 计算中…"):
+            with st.spinner(t("Bootstrap / 蒙特卡洛 / Reality Check 计算中…")):
                 boot = block_bootstrap(r, int(n_boot), int(block))
                 mc = monte_carlo_trades(rep["ledger"]["区间收益"].values if not rep["ledger"].empty
                                         else np.array([]), int(n_sim), mode=mc_mode)
@@ -1763,39 +1786,39 @@ with TABS[2]:
         if tests:
             m = st.columns(4)
             psr, dsr, p_rc = tests.get("PSR"), tests.get("DSR"), tests.get("RealityCheck_p")
-            m[0].metric("PSR 概率夏普", fmt_pct(psr, 1) if psr == psr else "-",
-                        "夏普>0 的把握")
-            m[1].metric("DSR 收缩夏普", fmt_pct(dsr, 1) if dsr and dsr == dsr else "-",
-                        f"已按 {tests.get('参数试验次数')} 次试验校正")
+            m[0].metric(t("PSR 概率夏普"), fmt_pct(psr, 1) if psr == psr else "-",
+                        t("夏普>0 的把握"))
+            m[1].metric(t("DSR 收缩夏普"), fmt_pct(dsr, 1) if dsr is not None and dsr == dsr else "-",
+                        t("已按 {} 次试验校正").format(tests.get("参数试验次数")))
             m[2].metric("Reality Check p", fmt_num(p_rc, 3) if p_rc == p_rc else "-",
-                        "越小越像真超额")
-            m[3].metric("蒙特卡洛亏损概率", fmt_pct(tests.get("亏损概率"), 1)
+                        t("越小越像真超额"))
+            m[3].metric(t("蒙特卡洛亏损概率"), fmt_pct(tests.get("亏损概率"), 1)
                         if tests.get("亏损概率") is not None else "-",
-                        tests.get("模式", ""))
+                        t(tests.get("模式", "")))
 
             verdict = []
             if psr == psr:
-                verdict.append("✅ PSR {:.1%}：夏普显著为正".format(psr) if psr > 0.95
-                               else "⚠️ PSR {:.1%}：还不足以排除运气".format(psr) if psr > 0.75
-                               else "❌ PSR {:.1%}：统计上更像噪声".format(psr))
-            if dsr and dsr == dsr:
-                verdict.append("✅ DSR {:.1%}：扣掉多重检验红利后依然显著".format(dsr) if dsr > 0.95
-                               else "❌ DSR {:.1%}：把「试了很多组参数」算进来后，优势基本消失".format(dsr))
+                verdict.append(t("✅ PSR {:.1%}：夏普显著为正").format(psr) if psr > 0.95
+                               else t("⚠️ PSR {:.1%}：还不足以排除运气").format(psr) if psr > 0.75
+                               else t("❌ PSR {:.1%}：统计上更像噪声").format(psr))
+            if dsr is not None and dsr == dsr:
+                verdict.append(t("✅ DSR {:.1%}：扣掉多重检验红利后依然显著").format(dsr) if dsr > 0.95
+                               else t("❌ DSR {:.1%}：把「试了很多组参数」算进来后，优势基本消失").format(dsr))
             if p_rc == p_rc:
-                verdict.append("✅ Reality Check p={:.3f}：超额收益难以用随机解释".format(p_rc) if p_rc < 0.05
-                               else "❌ Reality Check p={:.3f}：超额收益与随机不可区分".format(p_rc))
+                verdict.append(t("✅ Reality Check p={:.3f}：超额收益难以用随机解释").format(p_rc) if p_rc < 0.05
+                               else t("❌ Reality Check p={:.3f}：超额收益与随机不可区分").format(p_rc))
             for v in verdict:
                 st.markdown(f"- {v}")
 
-            st.markdown("#### Bootstrap 置信区间（500 次区块重抽）")
+            st.markdown(t("#### Bootstrap 置信区间"))
             ci = pd.DataFrame({
                 "指标": ["年化收益", "夏普比率", "最大回撤"],
                 "点估计": [stats["年化收益"], stats["夏普比率"], stats["最大回撤"]],
                 "5% 分位": [tests["Bootstrap_CAGR_5%"], tests["Bootstrap_Sharpe_5%"], tests["Bootstrap_MaxDD_5%"]],
                 "95% 分位": [tests["Bootstrap_CAGR_95%"], tests["Bootstrap_Sharpe_95%"], np.nan],
             })
-            st.dataframe(ci.style.format({"点估计": "{:.3f}", "5% 分位": "{:.3f}", "95% 分位": "{:.3f}"}),
-                         use_container_width=True)
+            st.dataframe(display_frame(ci).style.format(display_formats({"点估计": "{:.3f}", "5% 分位": "{:.3f}", "95% 分位": "{:.3f}"})),
+                         width="stretch")
 
             boot = rep.get("_boot")
             mc = rep.get("_mc")
@@ -1809,24 +1832,24 @@ with TABS[2]:
                     st.pyplot(hist_fig(mc["_mdds"] * 100, stats["最大回撤"] * 100,
                                        "Monte-Carlo Max Drawdown Distribution", "Max drawdown (%)"))
                 st.warning(
-                    "蒙特卡洛把同样这些交易打乱顺序重跑 {} 次：最坏 5% 的情形下回撤会到 {}，"
-                    "而历史上只出现了 {}。实盘要按前者准备心理和风控预案，而不是后者。".format(
-                        int(n_sim), fmt_pct(mc["回撤95%分位(最坏)"]), fmt_pct(stats["最大回撤"])))
+                    t("模拟 {} 次（{}）。最差 5% 分位的回撤为 {}，本次回测回撤为 {}。").format(
+                        len(mc["_mdds"]), t(mc["模式"]), fmt_pct(mc["回撤95%分位(最坏)"]), fmt_pct(stats["最大回撤"])))
 
 # ------------------------------------------------------------------ Tab 4
 with TABS[3]:
-    st.subheader("参数寻优：不要找最高的那个点，要找最宽的那片高原")
+    st.subheader(t("均线参数寻优"))
+    st.caption(t("按设定步长测试快慢均线组合，用热力图查看表现对参数变化的敏感度。"))
     sym4 = symbol_input("t4")
     c1, c2, c3 = st.columns(3)
-    fr = c1.slider("快线搜索范围", 2, 40, (3, 15))
-    sr_ = c2.slider("慢线搜索范围", 10, 150, (20, 60))
-    step = c3.number_input("步长", 1, 10, 2)
-    use_mp = st.checkbox("启用多进程（云端单核时会自动退回串行）", value=True)
+    fr = c1.slider(t("快线搜索范围"), 2, 40, (3, 15), key="fr")
+    sr_ = c2.slider(t("慢线搜索范围"), 10, 150, (20, 60), key="sr_")
+    step = c3.number_input(t("步长"), 1, 10, 2, key="step")
+    use_mp = st.checkbox(t("启用多进程（云端单核时会自动退回串行）"), value=True, key="use_mp")
 
-    if st.button("🚀 启动网格寻优", type="primary"):
+    if st.button(t("🚀 启动网格寻优"), type="primary", help=t("按设定步长测试快慢均线组合，用热力图查看表现对参数变化的敏感度。")):
         raw = fetch_ohlcv(sym4, start_date, end_date, data_source)
         if raw.empty:
-            st.error("取数失败。")
+            st.error(t("取数失败。"))
         else:
             bar = st.progress(0)
             txt = st.empty()
@@ -1834,114 +1857,112 @@ with TABS[3]:
 
             def cb(done, total):
                 bar.progress(min(int(done / total * 100), 100))
-                txt.text(f"已完成 {done}/{total} 组 | 耗时 {time.time()-t0:.1f}s")
+                txt.text(t("已完成 {}/{} 组 · {:.1f} 秒").format(done, total, time.time()-t0))
 
             grid = parallel_grid(raw, CFG, fr, sr_, int(step), cb, use_mp)
             if grid.empty:
-                st.error("没有有效结果，放宽一下搜索范围。")
+                st.error(t("没有有效结果，放宽一下搜索范围。"))
             else:
                 st.session_state["opt_results"] = plateau_score(grid, "夏普比率")
-                st.success(f"完成 {len(grid)} 组，耗时 {time.time()-t0:.1f}s")
+                st.success(t("完成 {} 组，耗时 {:.1f} 秒").format(len(grid), time.time()-t0))
 
     grid = st.session_state.get("opt_results")
     if grid is not None and not grid.empty:
         best_raw = grid.sort_values("夏普比率", ascending=False).iloc[0]
         best_rob = grid.dropna(subset=["邻域稳健分"]).iloc[0] if grid["邻域稳健分"].notna().any() else best_raw
         c1, c2 = st.columns(2)
-        c1.info(f"**最高夏普点**：快线 {int(best_raw['快线'])} / 慢线 {int(best_raw['慢线'])}，"
-                f"夏普 {best_raw['夏普比率']:.2f}，回撤 {best_raw['最大回撤']:.2%}")
-        c2.success(f"**邻域最稳点（推荐）**：快线 {int(best_rob['快线'])} / 慢线 {int(best_rob['慢线'])}，"
-                   f"夏普 {best_rob['夏普比率']:.2f}，稳健分 {best_rob['邻域稳健分']:.2f}")
-        st.caption("两者不一致时优先选后者：最高点常常是网格上的一根毛刺，换个样本就塌了；"
-                   "邻域稳健分 = 周围 3×3 参数的夏普均值 − 标准差，衡量的是「这一片」而不是「这一点」。")
+        c1.info(t("**最高夏普点**：快线 {} / 慢线 {}，夏普 {:.2f}，回撤 {:.2%}").format(int(best_raw['快线']), int(best_raw['慢线']), best_raw['夏普比率'], best_raw['最大回撤']))
+        c2.success(t("**邻域最稳点**：快线 {} / 慢线 {}，夏普 {:.2f}，稳健分 {:.2f}").format(int(best_rob['快线']), int(best_rob['慢线']), best_rob['夏普比率'], best_rob['邻域稳健分']))
+        st.caption(t("两者不一致时优先选后者：最高点常常是网格上的一根毛刺，换个样本就塌了；"
+                   "邻域稳健分 = 周围 3×3 参数的夏普均值 − 标准差，衡量的是「这一片」而不是「这一点」。"))
 
-        metric_pick = st.selectbox("热力图指标", ["夏普比率", "年化收益", "最大回撤", "卡玛比率", "邻域稳健分"])
+        metric_pick = st.selectbox(t("热力图指标"), ["夏普比率", "年化收益", "最大回撤", "卡玛比率", "邻域稳健分"], format_func=option_label, key="metric_pick")
         pivot = grid.pivot_table(index="快线", columns="慢线", values=metric_pick)
-        st.pyplot(heatmap_fig(pivot, f"Parameter Surface — {metric_pick}",
+        st.pyplot(heatmap_fig(pivot, f"Parameter Surface — {english_label(metric_pick)}",
                               "Slow MA", "Fast MA",
                               cmap="RdYlGn" if metric_pick != "最大回撤" else "RdYlGn_r"))
 
-        st.dataframe(grid.head(30).style.format({
+        st.dataframe(display_frame(grid.head(30)).style.format(display_formats({
             "年化收益": "{:.2%}", "夏普比率": "{:.2f}", "最大回撤": "{:.2%}",
-            "卡玛比率": "{:.2f}", "在场比例": "{:.1%}", "邻域稳健分": "{:.2f}"}),
-            use_container_width=True, height=340)
-        st.download_button("⬇️ 下载寻优结果 CSV",
-                           grid.to_csv(index=False).encode("utf-8-sig"),
-                           file_name="grid_search.csv", mime="text/csv")
-        st.info(f"本次共试了 **{len(grid)}** 组参数。把这个数字填到「稳健性与显著性」页的 "
-                f"DSR 试验次数里，才能知道最优夏普里有多少是多重检验白捡的。")
+            "卡玛比率": "{:.2f}", "在场比例": "{:.1%}", "邻域稳健分": "{:.2f}"})),
+            width="stretch", height=340)
+        st.download_button(t("⬇️ 下载寻优结果 CSV"),
+                           display_frame(grid).to_csv(index=False).encode("utf-8-sig"),
+                           file_name="grid_search.csv", mime="text/csv", help=t("下载全部有效参数组合及其指标。"))
+        st.info(t("共测试 **{}** 组参数。可在「稳健性检验」中填入该试验次数计算 DSR。").format(len(grid)))
 
 # ------------------------------------------------------------------ Tab 5
 with TABS[4]:
-    st.subheader("Walk-Forward：只用过去的信息选参数，再拿它赌未来")
-    st.caption("全样本寻优的结果永远好看，因为参数已经看过答案。WFA 把「选参数」和「验证」在时间上彻底隔开。")
+    st.subheader(t("滚动样本外验证"))
+    st.caption(t("全样本寻优的结果永远好看，因为参数已经看过答案。WFA 把「选参数」和「验证」在时间上彻底隔开。"))
     sym5 = symbol_input("t5")
     c1, c2, c3, c4 = st.columns(4)
-    n_splits = c1.number_input("切分段数", 3, 10, 5)
-    train_ratio = c2.slider("训练占比", 0.5, 0.9, 0.7, 0.05)
-    fr5 = c3.slider("快线范围", 2, 40, (3, 15), key="wf_f")
-    sr5 = c4.slider("慢线范围", 10, 150, (20, 60), key="wf_s")
+    n_splits = c1.number_input(t("切分段数"), 3, 10, 5, key="n_splits")
+    train_ratio = c2.slider(t("训练占比"), 0.5, 0.9, 0.7, 0.05, key="train_ratio")
+    fr5 = c3.slider(t("快线范围"), 2, 40, (3, 15), key="wf_f")
+    sr5 = c4.slider(t("慢线范围"), 10, 150, (20, 60), key="wf_s")
     step5 = st.number_input("步长", 1, 10, 3, key="wf_step")
 
-    if st.button("🧪 运行 Walk-Forward", type="primary"):
+    if st.button(t("🧪 运行 Walk-Forward"), type="primary", help=t("在较早的窗口选参数，用随后的数据验证，最后拼接各段样本外结果。")):
         raw = fetch_ohlcv(sym5, start_date, end_date, data_source)
         if raw.empty:
             st.error("取数失败。")
         elif len(raw) < 300:
-            st.error("样本不足 300 个交易日，WFA 没有意义，拉长回测区间。")
+            st.error(t("样本不足 300 个交易日，WFA 没有意义，拉长回测区间。"))
         else:
             bar = st.progress(0)
-            with st.spinner("逐段优化并做样本外验证…"):
+            with st.spinner(t("逐段优化并做样本外验证…")):
                 wfa = walk_forward(raw, CFG, fr5, sr5, int(step5), int(n_splits),
                                    float(train_ratio),
                                    progress_cb=lambda d, t: bar.progress(int(d / t * 100)))
             if not wfa:
-                st.error("没有产生有效分段，减少段数或拉长样本。")
+                st.error(t("没有产生有效分段，减少段数或拉长样本。"))
             else:
                 st.session_state["wfa_results"] = wfa
 
     wfa = st.session_state.get("wfa_results")
     if wfa:
         m = st.columns(5)
-        m[0].metric("样本外年化", fmt_pct(wfa["OOS年化"]))
-        m[1].metric("样本外夏普", fmt_num(wfa["OOS夏普"]))
-        m[2].metric("样本外最大回撤", fmt_pct(wfa["OOS最大回撤"]))
-        m[3].metric("WFE 效率", fmt_num(wfa["WFE"]), "样本外/样本内")
-        m[4].metric("样本外为正比例", fmt_pct(wfa["样本外为正比例"], 0))
+        m[0].metric(t("样本外年化"), fmt_pct(wfa["OOS年化"]))
+        m[1].metric(t("样本外夏普"), fmt_num(wfa["OOS夏普"]))
+        m[2].metric(t("样本外最大回撤"), fmt_pct(wfa["OOS最大回撤"]))
+        m[3].metric(t("WFE 效率"), fmt_num(wfa["WFE"]), t("样本外/样本内"))
+        m[4].metric(t("样本外为正比例"), fmt_pct(wfa["样本外为正比例"], 0))
 
         wfe = wfa["WFE"]
         if wfe == wfe:
             if wfe > 0.8:
-                st.success("WFE {:.2f}：样本外几乎完整保留了样本内表现，参数是稳的。".format(wfe))
+                st.success(t("WFE {:.2f}：样本外几乎完整保留了样本内表现，参数是稳的。").format(wfe))
             elif wfe > 0.4:
-                st.warning("WFE {:.2f}：样本外衰减明显但仍为正，可以用，但要下调收益预期。".format(wfe))
+                st.warning(t("WFE {:.2f}：样本外衰减明显但仍为正，可以用，但要下调收益预期。").format(wfe))
             else:
-                st.error("WFE {:.2f}：样本外几乎没有延续性，当前参数高度依赖历史，不建议直接上。".format(wfe))
+                st.error(t("WFE {:.2f}：样本外几乎没有延续性，当前参数高度依赖历史，不建议直接上。").format(wfe))
 
-        st.markdown("#### 样本外拼接净值")
-        st.line_chart(wfa["oos_equity"])
-        st.markdown("#### 分段明细")
-        st.dataframe(wfa["table"].style.format({
-            "样本内年化": "{:.2%}", "样本外年化": "{:.2%}", "样本外回撤": "{:.2%}"}),
-            use_container_width=True)
-        st.caption("看「选中快线/慢线」这两列：如果每一段选出来的参数跳来跳去，说明参数本身没有稳定含义，"
-                   "即使 WFE 还不错也要谨慎。")
+        st.markdown(t("#### 样本外拼接净值"))
+        st.line_chart(wfa["oos_equity"].rename(t("策略净值")))
+        st.markdown(t("#### 分段明细"))
+        st.dataframe(display_frame(wfa["table"]).style.format(display_formats({
+            "样本内年化": "{:.2%}", "样本外年化": "{:.2%}", "样本外回撤": "{:.2%}"})),
+            width="stretch")
+        st.caption(t("看「选中快线/慢线」这两列：如果每一段选出来的参数跳来跳去，说明参数本身没有稳定含义，"
+                   "即使 WFE 还不错也要谨慎。"))
 
 # ------------------------------------------------------------------ Tab 6
 with TABS[5]:
-    st.subheader("多资产组合：把钱按风险分，而不是按金额分")
-    codes_raw = st.text_input("资产池（逗号分隔，A 股填 6 位代码）", "AAPL, MSFT, NVDA, TSLA, GLD")
+    st.subheader(t("多资产组合回测"))
+    st.caption(t("输入至少两个资产代码，选择权重模型和再平衡频率，比较组合与等权基准。"))
+    codes_raw = st.text_input(t("资产池（逗号分隔，A 股填 6 位代码）"), "AAPL, MSFT, NVDA, TSLA, GLD", key="codes_raw")
     c1, c2, c3 = st.columns(3)
-    weight_method = c1.selectbox("权重模型",
-                                 ["ERC 风险平价", "逆波动率", "最小方差", "最大分散化", "等权重"])
-    rebalance = c2.selectbox("再平衡频率", ["每月", "每周", "每季", "每日"])
-    lookback = c3.number_input("协方差回看窗口", 20, 250, 60, 10)
+    weight_method = c1.selectbox(t("权重模型"),
+                                 ["ERC 风险平价", "逆波动率", "最小方差", "最大分散化", "等权重"], format_func=option_label, key="weight_method")
+    rebalance = c2.selectbox(t("再平衡频率"), ["每月", "每周", "每季", "每日"], format_func=option_label, key="rebalance")
+    lookback = c3.number_input(t("协方差回看窗口"), 20, 250, 60, 10, key="lookback")
     c1, c2, c3 = st.columns(3)
-    drift_th = c1.number_input("权重漂移阈值（低于则不调仓）", 0.0, 0.5, 0.0, 0.01)
-    port_vol_target = c2.number_input("组合目标波动率（年化，0=关闭）", 0.0, 0.5, 0.0, 0.01)
-    dd_cutoff = c3.number_input("回撤熔断阈值（0=关闭）", 0.0, 0.6, 0.0, 0.05)
+    drift_th = c1.number_input(t("权重漂移阈值（低于则不调仓）"), 0.0, 0.5, 0.0, 0.01, key="drift_th")
+    port_vol_target = c2.number_input(t("组合目标波动率（年化，0=关闭）"), 0.0, 0.5, 0.0, 0.01, key="port_vol_target")
+    dd_cutoff = c3.number_input(t("回撤熔断阈值（0=关闭）"), 0.0, 0.6, 0.0, 0.05, key="dd_cutoff")
 
-    if st.button("▶️ 运行组合回测", type="primary"):
+    if st.button(t("▶️ 运行组合回测"), type="primary", help=t("输入至少两个资产代码，选择权重模型和再平衡频率，比较组合与等权基准。")):
         syms = []
         for s in codes_raw.split(","):
             s = s.strip()
@@ -1949,14 +1970,14 @@ with TABS[5]:
                 continue
             digits = "".join(ch for ch in s if ch.isdigit())
             syms.append(normalize_symbol(s, "A股" if len(digits) == 6 and len(s) <= 7 else "美股"))
-        with st.spinner(f"拉取 {len(syms)} 只标的并执行 {weight_method}…"):
+        with st.spinner(t("正在获取 {} 个标的并计算{}组合…").format(len(syms), t(weight_method))):
             data = {}
             for s in syms:
                 df = fetch_ohlcv(s, start_date, end_date, data_source)
                 if not df.empty:
                     data[s] = df
             if len(data) < 2:
-                st.error("至少要有 2 只标的成功取数。")
+                st.error(t("至少要有 2 只标的成功取数。"))
             else:
                 st.session_state["portfolio_result"] = run_portfolio(
                     data, CFG, weight_method, int(lookback), rebalance,
@@ -1970,39 +1991,39 @@ with TABS[5]:
         cagr = curve["组合净值"].iloc[-1] ** (1 / years) - 1 if years > 0 else np.nan
         sharpe = r.mean() / r.std() * np.sqrt(TRADING_DAYS) if r.std() > 0 else np.nan
         m = st.columns(5)
-        m[0].metric("组合累计", fmt_pct(curve["组合净值"].iloc[-1] - 1),
-                    f"等权基准 {fmt_pct(curve['基准净值'].iloc[-1] - 1)}")
-        m[1].metric("组合年化", fmt_pct(cagr))
-        m[2].metric("组合夏普", fmt_num(sharpe))
-        m[3].metric("组合最大回撤", fmt_pct(curve["Drawdown"].min()))
-        m[4].metric("再平衡成本累计", fmt_pct(pr.get("rebal_cost_total", 0.0)),
-                    f"{len(pr['codes'])} 只标的")
+        m[0].metric(t("组合累计"), fmt_pct(curve["组合净值"].iloc[-1] - 1),
+                    t("等权基准 {}").format(fmt_pct(curve["基准净值"].iloc[-1] - 1)))
+        m[1].metric(t("组合年化"), fmt_pct(cagr))
+        m[2].metric(t("组合夏普"), fmt_num(sharpe))
+        m[3].metric(t("组合最大回撤"), fmt_pct(curve["Drawdown"].min()))
+        m[4].metric(t("再平衡成本累计"), fmt_pct(pr.get("rebal_cost_total", 0.0)),
+                    t("{} 只标的").format(len(pr["codes"])))
 
-        st.line_chart(curve[["基准净值", "组合净值"]])
+        st.line_chart(display_frame(curve[["基准净值", "组合净值"]]))
         st.area_chart(curve[["Drawdown"]] * 100)
 
         c1, c2 = st.columns(2)
         with c1:
-            st.markdown("#### 权重演化")
+            st.markdown(t("#### 权重演化"))
             st.area_chart(pr["weights"])
-            st.markdown("#### 收益贡献分解")
+            st.markdown(t("#### 收益贡献分解"))
             st.bar_chart(pr["contribution"])
         with c2:
-            st.markdown("#### 期末风险贡献占比")
+            st.markdown(t("#### 期末风险贡献占比"))
             rcdf = pr["risk_contribution"].to_frame("风险贡献占比")
-            st.dataframe(rcdf.style.format("{:.1%}"), use_container_width=True)
-            st.caption("ERC 的目标就是让这一列各行尽量相等。如果仍然一家独大，"
-                       "说明回看窗口太短或该标的与其他资产高度相关，分散不掉。")
-            st.markdown("#### 相关性矩阵")
+            st.dataframe(display_frame(rcdf).style.format("{:.1%}"), width="stretch")
+            st.caption(t("ERC 的目标就是让这一列各行尽量相等。如果仍然一家独大，"
+                       "说明回看窗口太短或该标的与其他资产高度相关，分散不掉。"))
+            st.markdown(t("#### 相关性矩阵"))
             st.pyplot(corr_fig(pr["corr"]))
 
 # ------------------------------------------------------------------ Tab 7
 with TABS[6]:
-    st.subheader("AI 研报生成")
-    st.caption("大模型只负责组织语言和解释统计含义，所有数字都来自本地回测证据包，它不能也不会自己编数。")
+    st.subheader(t("AI 研报生成"))
+    st.caption(t("以当前回测及检验结果生成文字研报。可下载正文，也可下载用于核对数值的证据包。"))
     rep = current_report()
     if rep is None:
-        st.info("先跑一次回测。建议先把「稳健性与显著性」也跑完，研报的含金量主要在那一段。")
+        st.info(t("请先运行单标的回测。在「稳健性检验」运行检验后，研报还会纳入统计结果。"))
     else:
         tests = dict(rep.get("tests") or {})
         wfa = st.session_state.get("wfa_results")
@@ -2012,30 +2033,32 @@ with TABS[6]:
             tests["OOS夏普"] = wfa.get("OOS夏普")
         ev = build_evidence(rep["stats"], rep["tstats"], tests, rep["cfg"], rep["symbol"])
 
-        with st.expander("📦 查看交给模型的证据包（JSON）"):
+        with st.expander(t("📦 查看交给模型的证据包（JSON）")):
             st.json(ev)
 
+        language = st.session_state["ui_language"]
+        reports = rep.setdefault("written_reports", {})
         c1, c2 = st.columns([1, 1])
-        if c1.button("📝 生成研报", type="primary"):
-            with st.spinner("撰写中…"):
-                st.session_state["llm_report"] = llm_report(ev, llm_key, llm_base, llm_model)
-        if c2.button("🧱 只用本地模板生成"):
-            st.session_state["llm_report"] = local_report(ev)
+        if c1.button(t("📝 生成研报"), type="primary", help=t("配置 API Key 后使用所选模型生成研报；留空时使用本地模板。")):
+            with st.spinner(t("撰写中…")):
+                reports[language] = (llm_report(ev, llm_key, llm_base, llm_model), ev)
+        if c2.button(t("🧱 只用本地模板生成"), help=t("在本地根据当前回测结果生成研报，无需 API Key。")):
+            reports[language] = (local_report(ev), ev)
 
-        text = st.session_state.get("llm_report")
+        text, report_evidence = reports.get(language, (None, None))
         if text:
             st.markdown("---")
             st.markdown(text)
-            st.download_button("⬇️ 下载研报 Markdown", text.encode("utf-8"),
-                               file_name=f"report_{rep['symbol']}.md", mime="text/markdown")
+            st.download_button(t("⬇️ 下载研报 Markdown"), text.encode("utf-8"),
+                               file_name=f"report_{rep['symbol']}.md", mime="text/markdown", help=t("下载当前显示的研报正文。"))
             buf = io.StringIO()
-            buf.write(json.dumps(ev, ensure_ascii=False, indent=2))
-            st.download_button("⬇️ 下载证据包 JSON", buf.getvalue().encode("utf-8"),
-                               file_name=f"evidence_{rep['symbol']}.json", mime="application/json")
+            buf.write(json.dumps(report_evidence, ensure_ascii=False, indent=2))
+            st.download_button(t("⬇️ 下载证据包 JSON"), buf.getvalue().encode("utf-8"),
+                               file_name=f"evidence_{rep['symbol']}.json", mime="application/json", help=t("下载生成本报告时使用的结构化回测证据。"))
 
 st.markdown("---")
 st.caption(
-    "依赖状态：yfinance {} · akshare {} · scipy {} · requests {} · 中文字体 {}".format(
+    t("依赖状态：yfinance {} · akshare {} · scipy {} · requests {} · 中文字体 {}").format(
         "✅" if HAS_YF else "❌", "✅" if HAS_AK else "❌",
-        "✅" if HAS_SCIPY else "❌（ERC/最小方差已降级为逆波动近似）",
-        "✅" if HAS_REQUESTS else "❌", "✅" if CJK_FONT_OK else "图内使用英文标签"))
+        "✅" if HAS_SCIPY else t("❌（ERC/最小方差已降级为逆波动近似）"),
+        "✅" if HAS_REQUESTS else "❌", "✅" if CJK_FONT_OK else t("图内使用英文标签")))
