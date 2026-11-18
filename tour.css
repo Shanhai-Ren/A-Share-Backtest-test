@@ -1,0 +1,10 @@
+#quant-tour-open, #quant-tour button { font: inherit; color: inherit; cursor: pointer; border-radius: .45rem; border: 1px solid var(--st-border-color,#82948f); padding: .32rem .72rem; background: transparent; }
+#quant-tour-open:hover, #quant-tour button:hover { border-color: var(--st-primary-color,#278373); }
+#quant-tour { box-sizing: border-box; position: fixed; inset: auto; margin: 0; z-index: 999990; width: min(340px,calc(100vw - 20px)); padding: 16px; border-radius: 12px; color:var(--st-text-color,CanvasText); background:var(--st-background-color,Canvas); box-shadow: 0 6px 35px #0004; border: 1px solid var(--st-primary-color,#278373); font: inherit; }
+#quant-tour header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+#quant-tour p { margin: 8px 0 13px; line-height: 1.45; }
+#quant-tour footer { display:flex; align-items:center; gap:7px; }
+#quant-tour small { margin-right:auto; }
+#quant-tour [data-action="next"] { background:var(--st-primary-color,#17665a); color:var(--st-background-color,white); }
+#quant-tour button:disabled { opacity:.45; cursor:default; }
+.quant-tour-anchor { outline: 3px solid var(--st-primary-color,#278373) !important; outline-offset: 2px; border-radius:.3rem; }

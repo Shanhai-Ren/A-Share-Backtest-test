@@ -21,6 +21,8 @@
 ================================================================================
 """
 
+from pathlib import Path
+
 import io
 import json
 import time
@@ -32,6 +34,9 @@ from dataclasses import dataclass, asdict
 import numpy as np
 import pandas as pd
 import streamlit as st
+from outlook import render_outlook
+from research_note import SYSTEM_PROMPT, clean_evidence, extend_evidence, write_note
+from ui_text import bilingual as L
 from ui_text import english_label, t, display_frame, display_formats, display_report_name
 import matplotlib
 matplotlib.use("Agg")                     # 云端无显示设备，必须在 import pyplot 前设定
@@ -178,7 +183,7 @@ def normalize_symbol(raw: str, market: str) -> str:
 
 
 @st.cache_data(show_spinner=False, ttl=3600)
-def fetch_ohlcv(code: str, start, end, source: str = "自动") -> pd.DataFrame:
+def fetch_ohlcv(code: str, start, end, source: str = "自动", adjusted: bool = False) -> pd.DataFrame:
     """
     取 OHLCV。策略：
       - "自动"：A 股优先用 akshare（前复权质量更好），失败再退 yfinance；美股直接 yfinance
@@ -189,7 +194,7 @@ def fetch_ohlcv(code: str, start, end, source: str = "自动") -> pd.DataFrame:
     def _from_yf(c):
         if not HAS_YF:
             return pd.DataFrame()
-        df = yf.Ticker(c).history(start=start, end=end, auto_adjust=False)
+        df = yf.Ticker(c).history(start=start, end=(pd.Timestamp(end) + pd.Timedelta(days=1) if adjusted else end), auto_adjust=adjusted)
         if df.empty:
             return pd.DataFrame()
         try:
@@ -224,7 +229,7 @@ def fetch_ohlcv(code: str, start, end, source: str = "自动") -> pd.DataFrame:
     elif source == "akshare":
         order = [_from_ak]
     else:
-        order = [_from_ak, _from_yf] if is_a else [_from_yf, _from_ak]
+        order = [_from_ak, _from_yf] if is_a else [_from_yf]
 
     for fn in order:
         try:
@@ -358,11 +363,29 @@ def _sig_rsi(d: pd.DataFrame, cfg: BTConfig):
     return entry, exit_
 
 
+def _sig_pullback(d, cfg):
+    slow, rsi = d["Slow_MA"], d["RSI"]
+    uptrend = (d["收盘"] > slow) & (slow > slow.shift(5))
+    recovery = (rsi.shift(1) <= 45) & (rsi > 45)
+    return uptrend & recovery, (d["收盘"] < slow) | (rsi > cfg.rsi_sell)
+
+
+def _sig_breakout(d, cfg):
+    close = d["收盘"]
+    range_risk = d["ATR"] / close
+    prior_high = d["最高"].rolling(55).max().shift(1)
+    prior_low = d["最低"].rolling(20).min().shift(1)
+    threshold = range_risk.rolling(126, min_periods=63).quantile(.75).shift(1)
+    return (close > prior_high) & (range_risk <= threshold), close < prior_low
+
+
 SIGNAL_LIB = {
     "趋势跟踪 (MA+MACD)": _sig_trend,
     "均值回归 (布林带)": _sig_meanrev,
     "时序动量 (MOM+ADX)": _sig_momentum,
     "RSI 反转": _sig_rsi,
+    "趋势回调再入场": _sig_pullback,
+    "波动过滤突破": _sig_breakout,
 }
 
 
@@ -965,20 +988,48 @@ def run_portfolio(data_dict: dict, cfg: BTConfig, weight_method: str,
       - 目标波动率：组合近期波动高于目标就整体缩仓；
       - 回撤熔断：组合回撤突破阈值后强制空仓，等净值修复再回来。
     """
-    strat_rets, bench_rets, per_asset = {}, {}, {}
+    per_asset = {}
     for code, raw in data_dict.items():
-        res = run_backtest(raw, cfg)
-        if res.empty:
-            continue
-        strat_rets[code] = res["策略每日收益"]
-        bench_rets[code] = res["每日收益率"]
-        per_asset[code] = res
-
-    if not strat_rets:
+        result = run_backtest(raw, cfg)
+        if not result.empty:
+            per_asset[code] = result
+    if len(per_asset) < 2:
         return {}
+    R = pd.DataFrame({k:v["策略每日收益"] for k,v in per_asset.items()}).dropna(how="all").fillna(0.)
+    B = pd.DataFrame({k:v["每日收益率"] for k,v in per_asset.items()}).reindex(R.index).fillna(0.)
+    args = (lookback, rebalance, drift_threshold, port_vol_target, dd_cutoff)
+    selected = allocate_portfolio(R, B, cfg, weight_method, *args)
+    rows = []
+    for rule in dict.fromkeys([weight_method, "核心–卫星", "等权重", "逆波动率"]):
+        run = selected if rule == weight_method else allocate_portfolio(R, B, cfg, rule, *args)
+        ret = run["curve"]["组合每日收益"].iloc[int(len(R)*.70):]
+        if len(ret) < 63:
+            continue
+        equity = (1 + ret).cumprod()
+        peaks = equity.cummax().clip(lower=1.)
+        sharpe = ((ret.mean()-cfg.rf_annual/TRADING_DAYS)/ret.std()*np.sqrt(TRADING_DAYS)
+                  if ret.std() > 1e-12 else np.nan)
+        rows.append({"配置方案":rule, "年化收益":equity.iloc[-1]**(TRADING_DAYS/len(ret))-1,
+                     "夏普比率":sharpe, "最大回撤":(equity/peaks-1).min()})
+    selected["comparison"] = pd.DataFrame(rows)
+    selected["comparison_start"] = R.index[int(len(R)*.70)]
+    selected["per_asset"] = per_asset
+    return selected
 
-    R = pd.DataFrame(strat_rets).dropna(how="all").fillna(0.0)
-    B = pd.DataFrame(bench_rets).reindex(R.index).fillna(0.0)
+
+def core_satellite(returns):
+    vol = returns.std().clip(lower=.0001)
+    inverse = 1 / vol
+    core = .60 * inverse / inverse.sum()
+    momentum = (1 + returns).prod() - 1
+    leaders = (momentum / vol)[momentum > 0].nlargest(max(1, (len(vol)+1)//2)).index
+    if len(leaders):
+        core.loc[leaders] += .40 * inverse.loc[leaders] / inverse.loc[leaders].sum()
+    return core.to_numpy()
+
+
+def allocate_portfolio(R, B, cfg, weight_method, lookback, rebalance,
+                       drift_threshold, port_vol_target, dd_cutoff):
     codes = list(R.columns)
     n = len(codes)
 
@@ -1000,7 +1051,8 @@ def run_portfolio(data_dict: dict, cfg: BTConfig, weight_method: str,
         if i >= lookback and bool(rb_mask.iloc[i]):
             window = R.iloc[i - lookback:i]
             cov = ledoit_wolf_shrink(window)
-            new_w = solve_weights(cov, weight_method)
+            new_w = (core_satellite(B.iloc[i-lookback:i]) if weight_method == "核心–卫星"
+                     else solve_weights(cov, weight_method))
             # 漂移阈值：新老权重差得不够多就不动，省下这一次的换手成本
             if not (drift_threshold > 0 and np.abs(new_w - cur_w).max() < drift_threshold):
                 cur_w = new_w
@@ -1065,7 +1117,6 @@ def run_portfolio(data_dict: dict, cfg: BTConfig, weight_method: str,
         "contribution": contrib,
         "risk_contribution": pd.Series(rc_pct, index=codes),
         "corr": R.corr(),
-        "per_asset": per_asset,
     }
 
 
@@ -1253,98 +1304,15 @@ def build_evidence(stats: dict, tstats: dict, tests: dict, cfg: BTConfig, symbol
                 for k, v in d.items() if not str(k).startswith("_")}
     return {
         "标的": symbol,
-        "策略配置": {k: v for k, v in asdict(cfg).items() if not isinstance(v, tuple)},
+        "策略配置": asdict(cfg),
         "绩效指标": rnd(stats),
         "交易统计": rnd(tstats),
         "统计检验": rnd(tests),
     }
 
 
-LLM_SYSTEM_PROMPT = """你是一名卖方量化研究员，正在为投研团队撰写一份策略回测评估报告。
-
-硬性要求：
-1. 只使用我给你的 JSON 数值，不得编造任何未出现的数字；引用数字时必须带单位。
-2. 结论必须区分「统计上站得住」和「只是历史上好看」。重点看 PSR、DSR、Reality Check p 值、
-   Walk-Forward 效率（WFE）与样本外表现，而不是只看累计收益。
-3. 如果证据不足以支持某个判断，直接写「数据不足以判断」，不要含糊其辞。
-4. 语气克制，不吹不贬。不要给投资建议，只做策略质量评估。
-
-输出结构（Markdown，总长 600-900 字）：
-## 一、结论
-## 二、收益与风险
-## 三、这个结果可信吗（统计检验解读）
-## 四、主要风险与失效场景
-## 五、下一步改进建议
-"""
-
-
 def local_report(ev: dict) -> str:
-    """
-    没有 API Key 时的本地规则模板。宁可用确定性的规则写，也不留空白。
-    """
-    s, trades, k = ev["绩效指标"], ev["交易统计"], ev["统计检验"]
-
-    def g(d, key, default=np.nan):
-        v = d.get(key, default)
-        return v if isinstance(v, (int, float)) and v == v else None
-
-    sharpe, mdd = g(s, "夏普比率"), g(s, "最大回撤")
-    cagr, excess = g(s, "年化收益"), g(s, "超额收益")
-    psr, p_rc, wfe = g(k, "PSR"), g(k, "RealityCheck_p"), g(k, "WFE")
-
-    verdicts = []
-    if psr is not None:
-        verdicts.append(t("PSR {:.0%}，{}").format(
-            psr, t("夏普显著为正的把握较高") if psr > 0.95 else
-                 t("尚不足以排除运气成分") if psr > 0.75 else t("统计上很可能是噪声")))
-    if p_rc is not None:
-        verdicts.append(t("Reality Check p = {:.3f}，{}").format(
-            p_rc, t("超额收益难以用随机性解释") if p_rc < 0.05 else t("超额收益无法与随机区分")))
-    if wfe is not None:
-        verdicts.append(t("Walk-Forward 效率 {:.2f}，{}").format(
-            wfe, t("样本外基本延续了样本内表现") if wfe > 0.6 else t("样本外明显衰减，过拟合嫌疑大")))
-
-    lines = [
-        t("## 一、结论"), "",
-        t("标的 **{}**，策略 **{}**。").format(ev["标的"], t(ev["策略配置"].get("strategy", "-"))),
-        t("回测区间年化 {}、最大回撤 {}、夏普 {}。").format(
-            f"{cagr:.2%}" if cagr is not None else "-",
-            f"{mdd:.2%}" if mdd is not None else "-",
-            f"{sharpe:.2f}" if sharpe is not None else "-"),
-        (t("相对买入持有的超额收益为 {:.2%}。").format(excess) if excess is not None else ""),
-        "", t("## 二、收益与风险"), "",
-    ]
-    for key in ["年化收益", "年化波动", "夏普比率", "索提诺比率", "卡玛比率",
-                "最大回撤", "最长回撤天数", "在场比例", "年换手率"]:
-        v = s.get(key)
-        if isinstance(v, (int, float)) and v == v:
-            if key in ("年化收益", "年化波动", "最大回撤", "在场比例"):
-                fmt = f"{v:.2%}"
-            elif key == "最长回撤天数":
-                fmt = t("{} 天").format(int(v))
-            else:
-                fmt = f"{v:.2f}"
-            lines.append(f"- {t(key)} · {fmt}")
-    if trades:
-        lines += ["", t("交易层面：共 {} 笔，胜率 {:.1%}，盈亏比 {}，最大连亏 {} 次，平均持有 {:.0f} 天。").format(
-            trades.get("交易笔数", 0), trades.get("胜率", 0) or 0,
-            f"{trades.get('盈亏比'):.2f}" if isinstance(trades.get("盈亏比"), (int, float)) and trades.get("盈亏比") == trades.get("盈亏比") else "-",
-            trades.get("最大连亏次数", 0), trades.get("平均持有天数", 0) or 0)]
-    lines += ["", t("## 三、这个结果可信吗"), ""]
-    lines += [f"- {v}" for v in verdicts] or [t("- 未运行统计检验，无法判断。")]
-    lines += [
-        "", t("## 四、主要风险与失效场景"), "",
-        t("- 趋势类策略在震荡市中会被反复止损，最大连亏次数是实盘最难扛的部分。"),
-        t("- 交易成本假设（佣金 {} bp、印花税 {} bp）若与实际券商费率不符，净值会明显偏移。").format(
-            ev["策略配置"].get("commission_bps"), ev["策略配置"].get("stamp_duty_bps")),
-        t("- 单标的回测不含选股环节，换一只标的结论未必成立。"),
-        "", t("## 五、下一步改进建议"), "",
-        t("- 用 Walk-Forward 而不是全样本寻优来确定参数。"),
-        t("- 扩大到多标的组合，用风险平价分散单一标的的尾部风险。"),
-        t("- 引入更真实的滑点模型（按成交量或买卖价差），并做成本敏感性分析。"),
-        "", "---", t("*本报告由本地规则模板生成。*"),
-    ]
-    return "\n".join([x for x in lines if x is not None])
+    return write_note(ev, english=st.session_state.get("ui_language", "English") == "English")
 
 
 def llm_report(ev: dict, api_key: str, base_url: str, model: str, timeout: int = 90) -> str:
@@ -1358,8 +1326,7 @@ def llm_report(ev: dict, api_key: str, base_url: str, model: str, timeout: int =
     payload = {
         "model": model,
         "messages": [
-            {"role": "system", "content": LLM_SYSTEM_PROMPT + ("\nWrite all headings and prose in English."
-                                                       if st.session_state.get("ui_language") == "English" else "")},
+            {"role": "system", "content": SYSTEM_PROMPT + L("\nWrite in English.", "\n使用简体中文撰写。")},
             {"role": "user", "content": "以下是回测证据包（JSON）：\n\n"
                                         + json.dumps(ev, ensure_ascii=False, indent=2)},
         ],
@@ -1444,19 +1411,21 @@ def keep_selected_options():
             st.session_state[key] = st.session_state[key]
 
 
-st.sidebar.radio("语言 / Language", ["中文", "English"], key="ui_language",
+st.sidebar.radio("语言 / Language", ["English", "中文"], key="ui_language",
                  horizontal=True, on_change=keep_selected_options)
 option_label = english_label if st.session_state["ui_language"] == "English" else str
 st.sidebar.caption(t("右上角 **⋮ → 主题** 可选浅色、深色或跟随系统（Light / Dark / System）。"))
 st.title(t("全球量化投研"))
 st.caption(t("比较策略与买入持有的表现，查看交易成本、回撤和逐笔记录。"))
 
-with st.expander(t("第一次使用？从这里开始"), expanded=not st.session_state["history_reports"]):
-    st.markdown("\n\n".join(t(step) for step in (
-        "1. 在左侧选择日期和策略。初次体验可以保留默认参数。",
-        "2. 在「单标的回测」选择市场、填入代码（如沪深 A 股 `600519` 或美股 `AAPL`），点击「运行回测」。",
-        "3. 查看净值和回撤，再到「交易台账」核对每笔交易。需要导出时，打开「研报导出」并生成报告。",
-    )))
+st.html(Path(__file__).with_name("tour.css"))
+tour = st.components.v2.component(
+    "quant_research_guide",
+    html='<button id="quant-tour-open" type="button"></button>',
+    js=Path(__file__).with_name("tour.js").read_text(encoding="utf-8"),
+    isolate_styles=False,
+)
+tour(data=st.session_state["ui_language"], key="guided_tour")
 
 with st.sidebar:
     st.header(t("样本与数据源"))
@@ -1469,6 +1438,12 @@ with st.sidebar:
     st.header(t("策略与信号"))
     strategy = st.selectbox(t("策略类型"),
                             list(SIGNAL_LIB.keys()) + ["信号融合"], format_func=option_label, key="strategy")
+    if strategy == "趋势回调再入场":
+        st.caption(L("Research strategy · Enter when RSI recovers through 45 above a rising slow MA. Exit below the MA or at the RSI overbought threshold.",
+                     "研究策略 · 慢均线上行且价格在其上时，RSI 向上穿越 45 入场；跌破慢线或 RSI 超买时退出。"))
+    elif strategy == "波动过滤突破":
+        st.caption(L("Research strategy · Buy a 55-session high when ATR/price is below its recent 75th percentile. Exit below the prior 20-session low.",
+                     "研究策略 · 收盘突破此前 55 日高点，且 ATR/价格不高于近期第 75 百分位时入场；跌破此前 20 日低点退出。"))
     blend_members, blend_mode = (), "多数投票"
     if strategy == "信号融合":
         blend_members = tuple(st.multiselect(t("参与融合的子策略"), list(SIGNAL_LIB.keys()),
@@ -1581,7 +1556,7 @@ def current_report():
 # 13. 页面
 # ==============================================================================
 TABS = st.tabs([t(name) for name in (
-    "单标的回测", "交易台账", "稳健性检验", "参数寻优", "滚动验证", "多资产组合", "研报导出",
+    "单标的回测", "交易台账", "稳健性检验", "参数寻优", "滚动验证", "多资产组合", "研报导出", "个股前瞻",
 )])
 
 # ------------------------------------------------------------------ Tab 1
@@ -1589,7 +1564,7 @@ with TABS[0]:
     st.subheader(t("单标的策略回测"))
     st.caption(t("按当前日期、策略和成本计算单个标的的表现，结果会加入本次会话的档案库。"))
     sym1 = symbol_input("t1")
-    if st.button(t("▶️ 运行回测"), type="primary", help=t("按当前日期、策略和成本计算单个标的的表现，结果会加入本次会话的档案库。")):
+    if st.button(t("▶️ 运行回测"), key="run_backtest", type="primary", help=t("按当前日期、策略和成本计算单个标的的表现，结果会加入本次会话的档案库。")):
         with st.spinner(t("取数并回测中…")):
             raw = fetch_ohlcv(sym1, start_date, end_date, data_source)
             if raw.empty:
@@ -1603,6 +1578,7 @@ with TABS[0]:
                     ledger = trade_ledger(res)
                     name = f"{sym1} | {CFG.strategy} | MA{CFG.fast_ma}-{CFG.slow_ma} | {time.strftime('%H:%M:%S')}"
                     st.session_state["history_reports"][name] = {
+                        "context": (sym1, str(start_date), str(end_date), data_source, asdict(CFG)),
                         "symbol": sym1, "raw": raw, "result": res, "cfg": CFG,
                         "stats": stats, "ledger": ledger,
                         "tstats": trade_stats(ledger), "quality": data_quality_report(raw),
@@ -1901,12 +1877,12 @@ with TABS[4]:
     train_ratio = c2.slider(t("训练占比"), 0.5, 0.9, 0.7, 0.05, key="train_ratio")
     fr5 = c3.slider(t("快线范围"), 2, 40, (3, 15), key="wf_f")
     sr5 = c4.slider(t("慢线范围"), 10, 150, (20, 60), key="wf_s")
-    step5 = st.number_input("步长", 1, 10, 3, key="wf_step")
+    step5 = st.number_input(t("步长"), 1, 10, 3, key="wf_step")
 
     if st.button(t("🧪 运行 Walk-Forward"), type="primary", help=t("在较早的窗口选参数，用随后的数据验证，最后拼接各段样本外结果。")):
         raw = fetch_ohlcv(sym5, start_date, end_date, data_source)
         if raw.empty:
-            st.error("取数失败。")
+            st.error(t("取数失败。"))
         elif len(raw) < 300:
             st.error(t("样本不足 300 个交易日，WFA 没有意义，拉长回测区间。"))
         else:
@@ -1918,6 +1894,7 @@ with TABS[4]:
             if not wfa:
                 st.error(t("没有产生有效分段，减少段数或拉长样本。"))
             else:
+                wfa["context"] = (sym5, str(start_date), str(end_date), data_source, asdict(CFG))
                 st.session_state["wfa_results"] = wfa
 
     wfa = st.session_state.get("wfa_results")
@@ -1954,7 +1931,10 @@ with TABS[5]:
     codes_raw = st.text_input(t("资产池（逗号分隔，A 股填 6 位代码）"), "AAPL, MSFT, NVDA, TSLA, GLD", key="codes_raw")
     c1, c2, c3 = st.columns(3)
     weight_method = c1.selectbox(t("权重模型"),
-                                 ["ERC 风险平价", "逆波动率", "最小方差", "最大分散化", "等权重"], format_func=option_label, key="weight_method")
+                                 ["ERC 风险平价", "核心–卫星", "逆波动率", "最小方差", "最大分散化", "等权重"], format_func=option_label, key="weight_method")
+    if weight_method == "核心–卫星":
+        st.caption(L("60% inverse-volatility core plus a 40% satellite in the strongest half of assets with positive risk-adjusted momentum. If none qualify, the satellite holds cash. Both sleeves use the selected per-asset entry and exit rules.",
+                     "核心仓位 60% 按逆波动率配置，卫星仓位 40% 选择回看期内动量为正、风险调整动量排名靠前的至多一半资产，内部按逆波动率配置。无合格标的时卫星仓持现。两部分均沿用已选单资产择时规则。"))
     rebalance = c2.selectbox(t("再平衡频率"), ["每月", "每周", "每季", "每日"], format_func=option_label, key="rebalance")
     lookback = c3.number_input(t("协方差回看窗口"), 20, 250, 60, 10, key="lookback")
     c1, c2, c3 = st.columns(3)
@@ -1986,6 +1966,23 @@ with TABS[5]:
     pr = st.session_state.get("portfolio_result")
     if pr:
         curve = pr["curve"]
+        comparison = pr.get("comparison", pd.DataFrame())
+        st.markdown(L("#### Allocation comparison","#### 组合方案对照"))
+        if not comparison.empty:
+            ranked = comparison.sort_values("夏普比率", ascending=False, na_position="last")
+            start_eval = pr["comparison_start"].strftime("%Y-%m-%d")
+            st.caption(L(f"Final 30% of the sample, {start_eval} through {curve.index[-1]:%Y-%m-%d}. All rules share the same assets, timing rules, costs and dates. Sorted by net Sharpe.",
+                         f"统一标的、择时规则、成本和日期，在样本最后 30%（{start_eval} 至 {curve.index[-1]:%Y-%m-%d}）按扣费后夏普排序。"))
+            if pd.notna(ranked.iloc[0]["夏普比率"]):
+                highest = ranked.iloc[0]["夏普比率"]
+                winners = ranked.loc[np.isclose(ranked["夏普比率"],highest),"配置方案"]
+                names = ", ".join(t(rule) for rule in winners)
+                st.write(L(f"Highest historical Sharpe in this window: {names} ({highest:.2f}).",f"该窗口历史夏普最高的方案：{names}（{highest:.2f}）。"))
+            display = ranked.copy()
+            display["配置方案"] = display["配置方案"].map(t)
+            st.dataframe(display_frame(display).style.format(display_formats({"年化收益":"{:.2%}","最大回撤":"{:.2%}","夏普比率":"{:.2f}"}), na_rep="—"), hide_index=True, width="stretch")
+        else:
+            st.caption(L("Extend the sample to allow at least 63 evaluation sessions.","请延长样本，使评估窗口至少包含 63 个交易日。"))
         r = curve["组合每日收益"]
         years = len(curve) / TRADING_DAYS
         cagr = curve["组合净值"].iloc[-1] ** (1 / years) - 1 if years > 0 else np.nan
@@ -2027,11 +2024,13 @@ with TABS[6]:
     else:
         tests = dict(rep.get("tests") or {})
         wfa = st.session_state.get("wfa_results")
-        if wfa:
+        if wfa and rep.get("context") and wfa.get("context") == rep["context"]:
             tests["WFE"] = wfa.get("WFE")
             tests["OOS年化"] = wfa.get("OOS年化")
             tests["OOS夏普"] = wfa.get("OOS夏普")
         ev = build_evidence(rep["stats"], rep["tstats"], tests, rep["cfg"], rep["symbol"])
+
+        ev = clean_evidence(extend_evidence(ev, rep["result"], rep["ledger"]))
 
         with st.expander(t("📦 查看交给模型的证据包（JSON）")):
             st.json(ev)
@@ -2055,6 +2054,9 @@ with TABS[6]:
             buf.write(json.dumps(report_evidence, ensure_ascii=False, indent=2))
             st.download_button(t("⬇️ 下载证据包 JSON"), buf.getvalue().encode("utf-8"),
                                file_name=f"evidence_{rep['symbol']}.json", mime="application/json", help=t("下载生成本报告时使用的结构化回测证据。"))
+
+with TABS[7]:
+    render_outlook(fetch_ohlcv, normalize_symbol, start_date, end_date, data_source)
 
 st.markdown("---")
 st.caption(

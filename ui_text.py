@@ -362,15 +362,24 @@ EN = {
     "9月": "Sep",
     "10月": "Oct",
     "11月": "Nov",
-    "12月": "Dec"
+    "12月": "Dec",
+    "趋势回调再入场": "Trend pullback re-entry",
+    "波动过滤突破": "Volatility-filtered breakout",
+    "核心–卫星": "Core–satellite",
+    "配置方案": "Allocation",
+    "个股前瞻": "Stock outlook"
 }
+
+def bilingual(english, chinese):
+    return english if st.session_state.get("ui_language", "English") == "English" else chinese
+
 
 def english_label(value):
     return EN.get(value, value)
 
 
 def t(value):
-    return english_label(value) if st.session_state.get("ui_language") == "English" else value
+    return english_label(value) if st.session_state.get("ui_language", "English") == "English" else value
 
 
 def display_report_name(name, label):
@@ -383,7 +392,7 @@ def display_formats(formats):
 
 
 def display_frame(frame):
-    if st.session_state.get("ui_language") != "English":
+    if st.session_state.get("ui_language", "English") != "English":
         return frame
     result = frame.rename(columns=english_label, index=english_label)
     result = result.rename_axis(index=english_label(frame.index.name),
