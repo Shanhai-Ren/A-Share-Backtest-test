@@ -2,7 +2,7 @@ import re
 import numpy as np
 import pandas as pd
 import streamlit as st
-from stock_model import rank_universe, csv_closes
+from stock_model import csv_closes, leader_vs_pool, rank_universe
 from ui_text import bilingual as L
 
 PRESETS = {
@@ -154,12 +154,13 @@ def render_outlook(fetch, normalize, start, end, source):
             L("Excluded for missing, short or stale prices: ", "因缺失、样本不足或最新日期不一致而排除：")
             + ", ".join(result["excluded"])
         )
-    best = scores.index[0]
-    if scores.estimate.max() > 0:
+    best_estimate = scores.estimate.max()
+    if best_estimate > 0:
+        leaders = ", ".join(scores.index[scores.estimate.eq(best_estimate)])
         st.write(
             L(
-                f"{best} ranks first in this universe with an estimated {scores.estimate.iloc[0]:+.1%} return.",
-                f"{best} 在本次股票池中排名第一，模型估计区间收益为 {scores.estimate.iloc[0]:+.1%}。",
+                f"The highest estimated return in this watchlist is {best_estimate:+.1%} ({leaders}).",
+                f"本次股票池最高的估计区间收益为 {best_estimate:+.1%}（{leaders}）。",
             )
         )
     else:
@@ -207,6 +208,26 @@ def render_outlook(fetch, normalize, start, end, source):
             f"检验涵盖 {n} 个不重叠预测期。上下沿为估计值加上该股票历史误差的第 10 和第 90 百分位；实际收益可能超出区间。",
         )
     )
+    periods = leader_vs_pool(result["validation"])
+    if not periods.empty:
+        st.markdown(L("#### Did the forecast leaders beat the watchlist?", "#### 预测排名首位的股票跑赢了股票池吗？"))
+        mean_spread = periods.spread.mean() * 100
+        wins = int(periods.spread.gt(0).sum())
+        left, right = st.columns(2)
+        left.metric(
+            L("Mean excess return", "平均超额收益"),
+            L(f"{mean_spread:+.2f} pp", f"{mean_spread:+.2f} 个百分点"),
+        )
+        right.metric(
+            L("Periods ahead of the pool", "跑赢股票池的期数占比"),
+            f"{wins / len(periods):.0%} ({wins}/{len(periods)})",
+        )
+        st.caption(
+            L(
+                f"Across {len(periods)} non-overlapping periods, we compare the next {h}-session return of the forecast leaders with the equal-weight watchlist. Tied leaders share equal weight. Returns are gross of trading costs.",
+                f"共 {len(periods)} 个不重叠预测期。每期比较预测首位股票与等权股票池随后 {h} 个交易日的实际收益。并列首位时等权分配，收益均未扣交易成本。",
+            )
+        )
     with st.expander(L("Model and validation details", "模型与验证明细")):
         st.write(
             L(
@@ -214,6 +235,25 @@ def render_outlook(fetch, normalize, start, end, source):
                 "特征包括 5、21、63 日收益，价格相对 63 日均线的偏离，以及 21 日波动率。每次拟合仅使用届时已实现标签的最近至多 756 条记录进行标准化和训练。秩相关系数比较至少三只股票在同一期的预测与实际排序。股票池选择可能带来幸存者偏差。预测未计交易成本、新闻或公司基本面。",
             )
         )
+        st.markdown(
+            L(
+                "The comparison follows Qlib’s approach of evaluating the top forecasts against the same-date universe. Each period has equal weight in the mean. [Qlib evaluation methods](https://github.com/microsoft/qlib/blob/main/qlib/contrib/eva/alpha.py)",
+                "参照 Qlib 比较高排名股票与同期股票池实际收益的方法，各预测期等权计算平均超额收益。[Qlib 评估方法](https://github.com/microsoft/qlib/blob/main/qlib/contrib/eva/alpha.py)",
+            )
+        )
+        if not periods.empty:
+            history = periods.copy()
+            history["date"] = history.date.dt.date
+            history["spread"] *= 100
+            history.columns = [
+                L("Forecast date", "预测日"),
+                L("Forecast leaders", "预测首位股票"),
+                L("Leaders’ return", "首位组实际收益"),
+                L("Watchlist return", "股票池实际收益"),
+                L("Excess (pp)", "超额（百分点）"),
+            ]
+            formats = {history.columns[2]: "{:.2%}", history.columns[3]: "{:.2%}", history.columns[4]: "{:+.2f}"}
+            st.dataframe(history.style.format(formats), hide_index=True, width="stretch")
         v = result["validation"][["date", "symbol", "forecast", "baseline", "realized"]].copy()
         v.columns = [
             L("Origin", "预测日"),

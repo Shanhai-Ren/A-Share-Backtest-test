@@ -367,7 +367,8 @@ EN = {
     "波动过滤突破": "Volatility-filtered breakout",
     "核心–卫星": "Core–satellite",
     "配置方案": "Allocation",
-    "个股前瞻": "Stock outlook"
+    "个股前瞻": "Stock outlook",
+    "股债组合": "Stocks & bonds"
 }
 
 def bilingual(english, chinese):

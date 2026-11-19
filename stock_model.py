@@ -40,6 +40,22 @@ def fit_at(x, target, origin, horizon):
     return float(base + impact.sum()), base, impact, len(y)
 
 
+def leader_vs_pool(validation):
+    """Compare the forecast leaders and the full eligible pool over each realized horizon."""
+    periods = []
+    for date, sample in validation.groupby("date", sort=True):
+        if len(sample) < 2 or not np.isfinite(sample[["forecast", "realized"]]).all().all():
+            continue
+        leaders = sample.loc[sample.forecast.eq(sample.forecast.max())]
+        leader_return = leaders.realized.mean()
+        pool_return = sample.realized.mean()
+        spread = leader_return - pool_return
+        if abs(spread) < 1e-14:  # Equal returns can differ by floating-point rounding.
+            spread = 0.0
+        periods.append((date, ", ".join(sorted(leaders.symbol)), leader_return, pool_return, spread))
+    return pd.DataFrame(periods, columns=["date", "leaders", "leader_return", "pool_return", "spread"])
+
+
 def rank_universe(prices, horizon):
     """Use the last available common close; stale/short series never enter the ranking."""
     clean = {}
