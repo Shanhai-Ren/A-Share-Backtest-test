@@ -29,13 +29,13 @@ import time
 import math
 import warnings
 import concurrent.futures
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, replace
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 from outlook import render_outlook
-from balanced import render_balanced
+from balanced import BONDS, bond_etf_ohlcv, fund_name, render_balanced
 from research_note import SYSTEM_PROMPT, clean_evidence, extend_evidence, write_note
 from ui_text import bilingual as L
 from ui_text import english_label, t, display_frame, display_formats, display_report_name
@@ -1414,14 +1414,22 @@ def fmt_num(x, digits=2):
 # ==============================================================================
 # 12. 侧边栏：全局参数
 # ==============================================================================
+TAB_NAMES = ("回测", "交易台账", "稳健性检验", "参数寻优", "滚动验证", "多资产组合", "股债组合", "研报导出", "个股前瞻")
+
+
 def keep_selected_options():
     # Select boxes serialize their displayed text. Send the canonical values back
     # to the browser when the next render changes the option language.
     for key in ("data_source", "strategy", "blend_members", "t1_m", "t4_m", "t5_m",
                 "weight_method", "rebalance", "metric_pick", "sb_currency", "sb_method", "sb_freq",
-                "sb_equity_USD", "sb_bond_USD", "sb_equity_CNY", "sb_bond_CNY"):
+                "sb_equity_USD", "sb_bond_USD", "sb_equity_CNY", "sb_bond_CNY",
+                "backtest_asset", "bond_market", "bond_symbol_CNY", "bond_symbol_USD"):
         if key in st.session_state:
             st.session_state[key] = st.session_state[key]
+    for name in TAB_NAMES:
+        if st.session_state.get("research_tabs") in (name, english_label(name)):
+            st.session_state["research_tabs"] = t(name)
+            break
 
 
 st.sidebar.radio("语言 / Language", ["English", "中文"], key="ui_language",
@@ -1518,6 +1526,19 @@ with st.sidebar:
 
         def select_report():
             st.session_state["current_report_key"] = st.session_state["archive_choice"]
+            report = st.session_state["history_reports"][st.session_state["archive_choice"]]
+            asset = report.get("asset_type", "stock")
+            symbol = report["symbol"]
+            china = symbol.endswith((".SS", ".SZ"))
+            st.session_state["backtest_asset"] = asset
+            if asset == "bond":
+                market = "CNY" if china else "USD"
+                st.session_state["bond_market"] = market
+                st.session_state["bond_symbol_" + market] = symbol
+            else:
+                market = "A股 (沪深)" if china else "美股 (NASDAQ/NYSE)"
+                st.session_state["t1_m"] = market
+                st.session_state["t1_s_" + market[:2]] = symbol.split(".")[0] if china else symbol
 
         st.selectbox(t("查看历史研报"), keys, key="archive_choice",
                      format_func=lambda name: display_report_name(name, option_label), on_change=select_report)
@@ -1569,31 +1590,41 @@ def current_report():
 # ==============================================================================
 # 13. 页面
 # ==============================================================================
-TABS = st.tabs([t(name) for name in (
-    "单标的回测", "交易台账", "稳健性检验", "参数寻优", "滚动验证", "多资产组合", "股债组合", "研报导出", "个股前瞻",
-)])
-
-# ------------------------------------------------------------------ Tab 1
-with TABS[0]:
-    st.subheader(t("单标的策略回测"))
-    st.caption(t("按当前日期、策略和成本计算单个标的的表现，结果会加入本次会话的档案库。"))
-    sym1 = symbol_input("t1")
+def render_single_backtest(asset_type):
+    is_bond = asset_type == "bond"
+    if is_bond:
+        left, right = st.columns([1, 2])
+        currency = left.selectbox(t("市场"), ["CNY", "USD"], key="bond_market",
+                                  format_func={"CNY": L("China · CNY", "中国 · 人民币"), "USD": L("US · USD", "美国 · 美元")}.get)
+        sym1 = right.selectbox(L("Bond ETF", "债券 ETF"), BONDS[currency], format_func=fund_name,
+                               key="bond_symbol_" + currency)
+        st.caption(L("Apply the sidebar strategy to adjusted ETF prices. Costs include commission and slippage, with zero stamp duty.",
+                     "沿用侧栏策略，用债券 ETF 复权行情回测。交易成本计入佣金和滑点，印花税按零计算。"))
+        config = replace(CFG, is_a_share=False, stamp_duty_bps=0.0)
+    else:
+        sym1 = symbol_input("t1")
+        config = CFG
     if st.button(t("▶️ 运行回测"), key="run_backtest", type="primary", help=t("按当前日期、策略和成本计算单个标的的表现，结果会加入本次会话的档案库。")):
         with st.spinner(t("取数并回测中…")):
-            raw = fetch_ohlcv(sym1, start_date, end_date, data_source)
+            raw = (bond_etf_ohlcv(fetch_ohlcv, sym1, start_date, end_date, data_source) if is_bond
+                   else fetch_ohlcv(sym1, start_date, end_date, data_source))
             if raw.empty:
-                st.error(t("没有取到数据，检查代码拼写或换一个数据源。"))
+                if is_bond and currency == "USD" and data_source == "akshare":
+                    st.warning(L("For US bond ETFs, choose Automatic or yfinance in the sidebar.",
+                                 "回测美国债券 ETF 时，请在侧栏将数据源设为自动或 yfinance。"))
+                else:
+                    st.error(t("没有取到数据，检查代码拼写或换一个数据源。"))
             else:
-                res = run_backtest(raw, CFG)
+                res = run_backtest(raw, config)
                 if res.empty:
                     st.error(t("样本太短，无法回测。"))
                 else:
-                    stats = performance_stats(res, CFG)
+                    stats = performance_stats(res, config)
                     ledger = trade_ledger(res)
-                    name = f"{sym1} | {CFG.strategy} | MA{CFG.fast_ma}-{CFG.slow_ma} | {time.strftime('%H:%M:%S')}"
+                    name = f"{sym1} | {config.strategy} | MA{config.fast_ma}-{config.slow_ma} | {time.strftime('%H:%M:%S')}"
                     st.session_state["history_reports"][name] = {
-                        "context": (sym1, str(start_date), str(end_date), data_source, asdict(CFG)),
-                        "symbol": sym1, "raw": raw, "result": res, "cfg": CFG,
+                        "context": (sym1, str(start_date), str(end_date), data_source, asdict(config)),
+                        "symbol": sym1, "raw": raw, "result": res, "cfg": config, "asset_type": asset_type,
                         "stats": stats, "ledger": ledger,
                         "tstats": trade_stats(ledger), "quality": data_quality_report(raw),
                     }
@@ -1601,7 +1632,7 @@ with TABS[0]:
                     st.rerun()
 
     rep = current_report()
-    if rep is None:
+    if rep is None or rep.get("asset_type", "stock") != asset_type or rep["symbol"] != sym1:
         st.info(t("先点上面的「运行回测」。左侧栏可以调策略、风控和成本假设。"))
     else:
         res, stats, cfg = rep["result"], rep["stats"], rep["cfg"]
@@ -1662,6 +1693,31 @@ with TABS[0]:
             rm = rolling_metrics(res, 126)
             if not rm.empty:
                 st.line_chart(display_frame(rm[["滚动夏普"]]))
+
+# ------------------------------------------------------------------ Tab 1
+def keep_asset_inputs():
+    # Keep market and symbol choices when switching to a different form.
+    saved = st.session_state.setdefault("asset_input_memory", {})
+    for key in ("t1_m", "t1_s_A股", "t1_s_美股", "bond_market", "bond_symbol_CNY", "bond_symbol_USD"):
+        if key in st.session_state:
+            saved[key] = st.session_state[key]
+    for key, value in saved.items():
+        st.session_state[key] = value
+
+
+TABS = st.tabs([t(name) for name in TAB_NAMES], key="research_tabs", on_change="rerun")
+with TABS[0]:
+    asset_labels = {"stock": L("Stocks", "股票"), "bond": L("Bond ETFs", "债券 ETF"),
+                    "mix": L("Stock–bond portfolio", "股债组合")}
+    asset = st.segmented_control(L("What would you like to backtest?", "选择回测标的"),
+                                 list(asset_labels), format_func=asset_labels.get, default="stock",
+                                 required=True, key="backtest_asset", on_change=keep_asset_inputs)
+    # Keep a single portfolio form and result shared by both entry points.
+    mix_on_home = asset == "mix" and not TABS[6].open
+    if mix_on_home:
+        render_balanced(fetch_ohlcv, start_date, end_date, data_source)
+    elif asset != "mix":
+        render_single_backtest(asset)
 
 # ------------------------------------------------------------------ Tab 2
 with TABS[1]:
@@ -2039,7 +2095,8 @@ with TABS[5]:
 
 # ------------------------------------------------------------------ Tab 7
 with TABS[6]:
-    render_balanced(fetch_ohlcv, start_date, end_date, data_source)
+    if not mix_on_home:
+        render_balanced(fetch_ohlcv, start_date, end_date, data_source)
 
 with TABS[7]:
     st.subheader(t("AI 研报生成"))
