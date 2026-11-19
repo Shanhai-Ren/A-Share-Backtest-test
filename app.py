@@ -35,6 +35,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from outlook import render_outlook
+from balanced import render_balanced
 from research_note import SYSTEM_PROMPT, clean_evidence, extend_evidence, write_note
 from ui_text import bilingual as L
 from ui_text import english_label, t, display_frame, display_formats, display_report_name
@@ -986,7 +987,7 @@ def run_portfolio(data_dict: dict, cfg: BTConfig, weight_method: str,
 
     组合级风控两条：
       - 目标波动率：组合近期波动高于目标就整体缩仓；
-      - 回撤熔断：组合回撤突破阈值后强制空仓，等净值修复再回来。
+      - 回撤熔断：当未启用熔断的参考组合回撤触及阈值，下一交易日转入现金；参考组合回撤收窄至阈值一半时，下一交易日恢复。
     """
     per_asset = {}
     for code, raw in data_dict.items():
@@ -1011,6 +1012,7 @@ def run_portfolio(data_dict: dict, cfg: BTConfig, weight_method: str,
                   if ret.std() > 1e-12 else np.nan)
         rows.append({"配置方案":rule, "年化收益":equity.iloc[-1]**(TRADING_DAYS/len(ret))-1,
                      "夏普比率":sharpe, "最大回撤":(equity/peaks-1).min()})
+    selected["rf_annual"] = cfg.rf_annual
     selected["comparison"] = pd.DataFrame(rows)
     selected["comparison_start"] = R.index[int(len(R)*.70)]
     selected["per_asset"] = per_asset
@@ -1061,45 +1063,55 @@ def allocate_portfolio(R, B, cfg, weight_method, lookback, rebalance,
 
     W = W.shift(1).fillna(1.0 / n)               # 权重同样延后一日生效
 
-    gross = (R * W).sum(axis=1)
+    # Sleeve returns already include each timing strategy's execution costs. The
+    # portfolio charges its configured per-side fee proxy on changes in allocation.
+    fee_rate = (cfg.commission_bps + cfg.slippage_bps) / 10000.0
 
-    # 组合层再平衡成本：每次调仓都要按换手额付佣金和滑点，这一笔不能漏
-    rebal_turnover = W.diff().abs().sum(axis=1).fillna(0.0)
-    rebal_cost = rebal_turnover * ((cfg.commission_bps + cfg.slippage_bps) / 10000.0)
-    gross = gross - rebal_cost
+    def allocation_costs(weights):
+        return weights.diff().abs().sum(axis=1) * fee_rate
 
-    # ---- 组合级目标波动率 ----
-    if port_vol_target and port_vol_target > 0:
-        realized = gross.rolling(20, min_periods=5).std() * np.sqrt(TRADING_DAYS)
-        scale = (port_vol_target / realized).clip(0, cfg.max_leverage).fillna(1.0).shift(1).fillna(1.0)
-    else:
-        scale = pd.Series(1.0, index=gross.index)
-    port_ret = gross * scale
+    if port_vol_target > 0:
+        unscaled = (R * W).sum(axis=1) - allocation_costs(W)
+        realized = unscaled.rolling(20, min_periods=5).std() * np.sqrt(TRADING_DAYS)
+        scale = (port_vol_target / realized).clip(upper=cfg.max_leverage).shift(1).fillna(1.0)
+        W = W.mul(scale, axis="index")
 
-    # ---- 组合级回撤熔断 ----
-    if dd_cutoff and dd_cutoff > 0:
-        eq, hwm, live = 1.0, 1.0, 1.0
-        adj = np.zeros(len(port_ret))
-        vals = port_ret.values
-        for i in range(len(vals)):
-            adj[i] = vals[i] * live
-            eq *= (1 + adj[i])
-            hwm = max(hwm, eq)
-            live = 0.0 if (eq / hwm - 1) < -dd_cutoff else 1.0
-            if live == 0.0 and eq / hwm - 1 > -dd_cutoff * 0.5:
-                live = 1.0                        # 修复一半回撤后再入场
-        port_ret = pd.Series(adj, index=port_ret.index)
+    # Observe the uncapped portfolio even while the funded account is in cash.
+    # At each close choose the exposure for the *following* trading session.
+    if dd_cutoff > 0:
+        reference = (R * W).sum(axis=1) - allocation_costs(W)
+        reference_nav = (1 + reference).cumprod()
+        reference_peak = reference_nav.cummax().clip(lower=1.0)
+        breach = reference_nav <= reference_peak * (1 - dd_cutoff)
+        recovery = reference_nav >= reference_peak * (1 - dd_cutoff / 2)
+        exposure = np.empty(len(W), dtype=bool)
+        invested = True
+        for i, (hit_stop, recovered) in enumerate(zip(breach, recovery)):
+            exposure[i] = invested
+            if hit_stop:
+                invested = False
+            elif recovered:
+                invested = True
+        W = W.mul(exposure, axis="index")
+
+    sleeve_returns = R * W
+    rebal_cost = allocation_costs(W)
+    port_ret = sleeve_returns.sum(axis=1) - rebal_cost
 
     out = pd.DataFrame(index=R.index)
     out["组合每日收益"] = port_ret
     out["基准每日收益"] = B.mean(axis=1)          # 基准固定等权买入持有
     out["组合净值"] = (1 + out["组合每日收益"]).cumprod()
     out["基准净值"] = (1 + out["基准每日收益"]).cumprod()
-    out["HWM"] = out["组合净值"].cummax()
+    out["HWM"] = out["组合净值"].cummax().clip(lower=1.0)
     out["Drawdown"] = out["组合净值"] / out["HWM"] - 1
 
-    # 分资产收益归因：各标的贡献 = 该标的收益 × 权重，再累加
-    contrib = (R * W).sum(axis=0).sort_values(ascending=False)
+    # Convert each daily sleeve P&L and fee to units of starting capital.
+    # Sum(sleeve contributions) minus cumulative allocation fees equals net return.
+    opening_nav = out["组合净值"].shift(1, fill_value=1.0)
+    contrib = sleeve_returns.mul(opening_nav, axis="index").sum().sort_values(ascending=False)
+    if dd_cutoff > 0:
+        out["熔断空仓"] = ~exposure
 
     last_cov = ledoit_wolf_shrink(R.iloc[-min(lookback, len(R)):])
     last_w = W.iloc[-1].values.astype(float)
@@ -1110,7 +1122,7 @@ def allocate_portfolio(R, B, cfg, weight_method, lookback, rebalance,
 
     return {
         "curve": out,
-        "rebal_cost_total": float(rebal_cost.sum()),
+        "rebal_cost_total": float((opening_nav * rebal_cost).sum()),
         "weights": W,
         "returns": R,
         "codes": codes,
@@ -1406,7 +1418,8 @@ def keep_selected_options():
     # Select boxes serialize their displayed text. Send the canonical values back
     # to the browser when the next render changes the option language.
     for key in ("data_source", "strategy", "blend_members", "t1_m", "t4_m", "t5_m",
-                "weight_method", "rebalance", "metric_pick"):
+                "weight_method", "rebalance", "metric_pick", "sb_currency", "sb_method", "sb_freq",
+                "sb_equity_USD", "sb_bond_USD", "sb_equity_CNY", "sb_bond_CNY"):
         if key in st.session_state:
             st.session_state[key] = st.session_state[key]
 
@@ -1416,7 +1429,8 @@ st.sidebar.radio("语言 / Language", ["English", "中文"], key="ui_language",
 option_label = english_label if st.session_state["ui_language"] == "English" else str
 st.sidebar.caption(t("右上角 **⋮ → 主题** 可选浅色、深色或跟随系统（Light / Dark / System）。"))
 st.title(t("全球量化投研"))
-st.caption(t("比较策略与买入持有的表现，查看交易成本、回撤和逐笔记录。"))
+st.caption(L("Backtest trading rules, compare stock–bond allocations and evaluate stock forecasts.",
+             "回测交易策略，比较股债配置，并检验个股预测的历史表现。"))
 
 st.html(Path(__file__).with_name("tour.css"))
 tour = st.components.v2.component(
@@ -1556,7 +1570,7 @@ def current_report():
 # 13. 页面
 # ==============================================================================
 TABS = st.tabs([t(name) for name in (
-    "单标的回测", "交易台账", "稳健性检验", "参数寻优", "滚动验证", "多资产组合", "研报导出", "个股前瞻",
+    "单标的回测", "交易台账", "稳健性检验", "参数寻优", "滚动验证", "多资产组合", "股债组合", "研报导出", "个股前瞻",
 )])
 
 # ------------------------------------------------------------------ Tab 1
@@ -1940,7 +1954,9 @@ with TABS[5]:
     c1, c2, c3 = st.columns(3)
     drift_th = c1.number_input(t("权重漂移阈值（低于则不调仓）"), 0.0, 0.5, 0.0, 0.01, key="drift_th")
     port_vol_target = c2.number_input(t("组合目标波动率（年化，0=关闭）"), 0.0, 0.5, 0.0, 0.01, key="port_vol_target")
-    dd_cutoff = c3.number_input(t("回撤熔断阈值（0=关闭）"), 0.0, 0.6, 0.0, 0.05, key="dd_cutoff")
+    dd_cutoff = c3.number_input(t("回撤熔断阈值（0=关闭）"), 0.0, 0.6, 0.0, 0.05, key="dd_cutoff",
+                              help=L("At the close, a reference portfolio running the same strategy tracks drawdown from its peak. The account moves to cash for the next session when the reference hits the cutoff. It resumes the session after the reference recovers to half that cutoff. Cash earns zero.",
+                                     "参考组合持续运行相同策略，并在收盘时计算相对前高的回撤。触及阈值后，账户于下一交易日转入零收益现金；参考组合回撤收窄至阈值的一半后，于下一交易日恢复。"))
 
     if st.button(t("▶️ 运行组合回测"), type="primary", help=t("输入至少两个资产代码，选择权重模型和再平衡频率，比较组合与等权基准。")):
         syms = []
@@ -1983,10 +1999,15 @@ with TABS[5]:
             st.dataframe(display_frame(display).style.format(display_formats({"年化收益":"{:.2%}","最大回撤":"{:.2%}","夏普比率":"{:.2f}"}), na_rep="—"), hide_index=True, width="stretch")
         else:
             st.caption(L("Extend the sample to allow at least 63 evaluation sessions.","请延长样本，使评估窗口至少包含 63 个交易日。"))
+        if "熔断空仓" in curve:
+            paused_days = int(curve["熔断空仓"].sum())
+            st.caption(L(f"The drawdown rule kept the portfolio in cash for {paused_days} sessions.",
+                         f"回撤熔断使组合在 {paused_days} 个交易日持有现金。"))
         r = curve["组合每日收益"]
         years = len(curve) / TRADING_DAYS
         cagr = curve["组合净值"].iloc[-1] ** (1 / years) - 1 if years > 0 else np.nan
-        sharpe = r.mean() / r.std() * np.sqrt(TRADING_DAYS) if r.std() > 0 else np.nan
+        rate = pr.get("rf_annual", 0.0) / TRADING_DAYS
+        sharpe = (r.mean() - rate) / r.std() * np.sqrt(TRADING_DAYS) if r.std() > 0 else np.nan
         m = st.columns(5)
         m[0].metric(t("组合累计"), fmt_pct(curve["组合净值"].iloc[-1] - 1),
                     t("等权基准 {}").format(fmt_pct(curve["基准净值"].iloc[-1] - 1)))
@@ -2005,6 +2026,8 @@ with TABS[5]:
             st.area_chart(pr["weights"])
             st.markdown(t("#### 收益贡献分解"))
             st.bar_chart(pr["contribution"])
+            st.caption(L("Each bar is a sleeve’s cumulative contribution per unit of starting capital. Subtract the portfolio allocation fees shown above to reconcile with total net return.",
+                         "各柱为相对期初本金的资产贡献。贡献合计减去上方组合调仓成本，即为组合累计净收益。"))
         with c2:
             st.markdown(t("#### 期末风险贡献占比"))
             rcdf = pr["risk_contribution"].to_frame("风险贡献占比")
@@ -2016,6 +2039,9 @@ with TABS[5]:
 
 # ------------------------------------------------------------------ Tab 7
 with TABS[6]:
+    render_balanced(fetch_ohlcv, start_date, end_date, data_source)
+
+with TABS[7]:
     st.subheader(t("AI 研报生成"))
     st.caption(t("以当前回测及检验结果生成文字研报。可下载正文，也可下载用于核对数值的证据包。"))
     rep = current_report()
@@ -2055,7 +2081,7 @@ with TABS[6]:
             st.download_button(t("⬇️ 下载证据包 JSON"), buf.getvalue().encode("utf-8"),
                                file_name=f"evidence_{rep['symbol']}.json", mime="application/json", help=t("下载生成本报告时使用的结构化回测证据。"))
 
-with TABS[7]:
+with TABS[8]:
     render_outlook(fetch_ohlcv, normalize_symbol, start_date, end_date, data_source)
 
 st.markdown("---")
