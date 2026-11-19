@@ -50,8 +50,11 @@ def completed_end(end, currency):
     return min(end, last)
 
 
+ETF_OHLCV = ["开盘", "最高", "最低", "收盘", "成交量"]
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
-def china_etf_close(symbol, start, end):
+def _china_etf_daily(symbol, start, end):
     import akshare as ak
 
     frame = ak.fund_etf_hist_em(
@@ -62,36 +65,64 @@ def china_etf_close(symbol, start, end):
         adjust="hfq",
     )
     if frame is None or frame.empty:
-        return pd.Series(dtype=float)
-    dates = pd.to_datetime(frame["日期"])
-    return pd.Series(pd.to_numeric(frame["收盘"], errors="coerce").to_numpy(), index=dates)
+        return pd.DataFrame()
+    return frame.set_index("日期")
+
+
+def _etf_history(fetch, symbol, start, end, source, columns):
+    """Load genuine adjusted bars, or just adjusted closes for allocation runs."""
+    symbol = symbol.strip().upper()
+    if symbol.endswith(".SH"):
+        symbol = symbol[:-3] + ".SS"
+    if len(symbol) == 6 and symbol.isdigit():
+        if symbol.startswith("5"):
+            symbol += ".SS"
+        elif symbol.startswith("1"):
+            symbol += ".SZ"
+    is_china = symbol.endswith((".SS", ".SZ"))
+    first = pd.Timestamp(start).date()
+    last = completed_end(pd.Timestamp(end).date(), "CNY" if is_china else "USD")
+    empty = pd.DataFrame(columns=columns, index=pd.DatetimeIndex([]), dtype=float)
+    if first > last:
+        return empty
+    sources = ("yfinance", "akshare") if source == "自动" else (source,)
+    for provider in sources:
+        try:
+            if provider == "akshare" and is_china:
+                frame = _china_etf_daily(symbol, first, last)
+            elif provider == "yfinance":
+                frame = fetch(symbol, first, last, "yfinance", adjusted=True)
+            else:
+                continue
+            if frame is None or frame.empty or not set(columns).issubset(frame.columns):
+                continue
+            bars = frame.loc[:, columns].apply(pd.to_numeric, errors="coerce")
+            # Preserve the provider's local session date when dropping its timezone.
+            bars.index = pd.DatetimeIndex(pd.to_datetime(bars.index, errors="coerce")).tz_localize(None).normalize()
+            bars = bars[bars.index.notna()].sort_index(kind="stable").loc[pd.Timestamp(first):pd.Timestamp(last)]
+            bars = bars.replace([float("inf"), -float("inf")], float("nan")).dropna()
+            bars = bars[bars["收盘"] > 0]
+            if "最低" in columns:
+                valid = ((bars["最低"] > 0) & (bars["成交量"] >= 0)
+                         & (bars["最低"] <= bars[["开盘", "收盘"]].min(axis=1))
+                         & (bars["最高"] >= bars[["开盘", "收盘"]].max(axis=1)))
+                bars = bars[valid]
+            if not bars.empty:
+                bars = bars[~bars.index.duplicated(keep="last")]
+                bars.attrs["provider"] = provider
+                return bars
+        except (ImportError, ValueError, TypeError, KeyError, OSError, RuntimeError):
+            continue
+    return empty
+
+
+def bond_etf_ohlcv(fetch, symbol, start, end, source):
+    return _etf_history(fetch, symbol, start, end, source, ETF_OHLCV)
 
 
 def prices_for(fetch, symbol, start, end, source):
-    is_china = symbol.endswith(".SS")
-    if source == "自动":
-        sources = ["yfinance", "akshare"] if is_china else ["yfinance"]
-    else:
-        sources = [source]
-    for provider in sources:
-        if provider == "akshare":
-            if not is_china:
-                continue
-            try:
-                series = china_etf_close(symbol, start, end)
-            except (ImportError, ValueError, KeyError, OSError, RuntimeError):
-                continue
-        else:
-            frame = fetch(symbol, start, end, "yfinance", adjusted=True)
-            series = frame["收盘"] if not frame.empty else pd.Series(dtype=float)
-        if series.empty:
-            continue
-        series = pd.to_numeric(series.sort_index(), errors="coerce").replace([float("inf"), -float("inf")], float("nan"))
-        series = series.loc[pd.Timestamp(start) : pd.Timestamp(end)].dropna()
-        series = series[series > 0]
-        if not series.empty:
-            return series, provider
-    return pd.Series(dtype=float), None
+    frame = _etf_history(fetch, symbol, start, end, source, ["收盘"])
+    return frame["收盘"], frame.attrs.get("provider")
 
 
 def allocation_name(method):

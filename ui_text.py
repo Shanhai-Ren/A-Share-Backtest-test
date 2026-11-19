@@ -14,6 +14,7 @@ EN = {
     "3. 查看净值和回撤，再到「交易台账」核对每笔交易。需要导出时，打开「研报导出」并生成报告。": "3. Review equity and drawdown, inspect individual trades in **Trades**, then generate a downloadable report under **Reports**.",
     "比较策略与买入持有的表现，查看交易成本、回撤和逐笔记录。": "Compare a strategy with buy-and-hold and inspect trading costs, drawdowns and individual trades.",
     "单标的回测": "Backtest",
+    "回测": "Backtest",
     "交易台账": "Trades",
     "稳健性检验": "Robustness",
     "参数寻优": "Grid search",
